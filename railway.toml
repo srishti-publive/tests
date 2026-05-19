@@ -1,7 +1,0 @@
-[build]
-builder = "nixpacks"
-
-[deploy]
-startCommand = "cd publive_mcp && python manage.py migrate && python manage.py collectstatic --noinput && gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:$PORT --timeout 60"
-healthcheckPath = "/auth/status"
-restartPolicyType = "on_failure"
