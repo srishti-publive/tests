@@ -5,10 +5,12 @@ _CDS_BASE = "https://cds.thepublive.com/publisher/{publisher_id}"
 
 
 def cds_get(credentials, path, params=None):
-    publisher_id = credentials["publisherId"]
-    api_key      = credentials["apiKey"]
-    api_secret   = credentials["apiSecret"]
+    publisher_id = credentials.get("publisherId", "")
+    if not publisher_id:
+        raise Exception("No publisher ID in credentials — please re-authenticate")
 
+    api_key    = credentials.get("apiKey", "")
+    api_secret = credentials.get("apiSecret", "")
     token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     url   = _CDS_BASE.format(publisher_id=publisher_id) + path
 
@@ -25,6 +27,6 @@ def cds_get(credentials, path, params=None):
             msg = data.get("detail") or data.get("message") or f"HTTP {resp.status_code}"
         except Exception:
             msg = f"HTTP {resp.status_code}"
-        raise Exception(msg)
+        raise Exception(f"{msg} [url={url}]")
 
     return resp.json()
