@@ -15,6 +15,7 @@ BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
+    "django.contrib.staticfiles",
     "auth_app",
     "mcp_app",
 ]
