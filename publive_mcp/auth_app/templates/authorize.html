@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Authorize Publive — MCP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-page:    #f3f4f6;
+      --bg-card:    #ffffff;
+      --bg-surface: #f9fafb;
+      --border:     #e5e7eb;
+      --border-focus: #1c64f2;
+      --text-primary:   #111827;
+      --text-secondary: #374151;
+      --text-muted:     #6b7280;
+      --text-placeholder: #9ca3af;
+      --accent:       #1c64f2;
+      --accent-hover: #1a56db;
+      --accent-light: #eff6ff;
+      --accent-text:  #1d4ed8;
+      --error-bg:   #fef2f2;
+      --error-border: #fecaca;
+      --error-text: #dc2626;
+      --success:    #16a34a;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      background: var(--bg-page);
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Top nav ── */
+    .topnav {
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      height: 56px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+    }
+
+    .nav-logo-icon {
+      width: 28px;
+      height: 28px;
+    }
+
+    .nav-logo-text {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.3px;
+    }
+
+    .nav-logo-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      padding: 2px 7px;
+      border-radius: 20px;
+      letter-spacing: 0.02em;
+    }
+
+    .nav-spacer { flex: 1; }
+
+    .nav-link {
+      font-size: 14px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+
+    .nav-link:hover { color: var(--text-primary); }
+
+    .nav-btn {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      padding: 7px 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: background 0.15s;
+      text-decoration: none;
+    }
+
+    .nav-btn:hover { background: var(--accent-hover); }
+
+    /* ── Page layout ── */
+    .page-body {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 24px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 36px 40px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+    }
+
+    /* ── Card header ── */
+    .card-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    .card-logo-icon {
+      width: 34px;
+      height: 34px;
+      background: var(--text-primary);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card-logo-icon svg { display: block; }
+
+    .card-logo-name {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.2px;
+    }
+
+    .card-logo-tag {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent-text);
+      background: var(--accent-light);
+      border: 1px solid #bfdbfe;
+      padding: 1px 7px;
+      border-radius: 20px;
+    }
+
+    h1 {
+      font-size: 21px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.3px;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      line-height: 1.55;
+    }
+
+    /* ── Steps box ── */
+    .steps {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+    }
+
+    .steps-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+    }
+
+    .step {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin-bottom: 7px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    .step:last-child { margin-bottom: 0; }
+
+    .step-num {
+      min-width: 18px;
+      height: 18px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 0.5px;
+      flex-shrink: 0;
+    }
+
+    .step strong { color: var(--text-primary); font-weight: 600; }
+
+    /* ── Error box ── */
+    .error-box {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      border-radius: 7px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--error-text);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .error-box.hidden { display: none; }
+
+    /* ── Form fields ── */
+    .field { margin-bottom: 16px; }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 5px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 7px;
+      padding: 9px 13px;
+      font-size: 14px;
+      color: var(--text-primary);
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input[type="text"]::placeholder,
+    input[type="password"]::placeholder { color: var(--text-placeholder); }
+
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px rgba(28, 100, 242, 0.12);
+    }
+
+    .password-wrap { position: relative; }
+    .password-wrap input { padding-right: 42px; }
+
+    .toggle-eye {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-placeholder);
+      font-size: 15px;
+      padding: 0;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+
+    .toggle-eye:hover { color: var(--text-muted); }
+
+    .hint {
+      font-size: 12px;
+      color: var(--text-placeholder);
+      margin-top: 4px;
+    }
+
+    /* ── Button ── */
+    .btn {
+      width: 100%;
+      padding: 10px 16px;
+      background: var(--accent);
+      border: none;
+      border-radius: 7px;
+      color: #fff;
+      font-size: 14.5px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+      margin-top: 8px;
+    }
+
+    .btn:hover  { background: var(--accent-hover); box-shadow: 0 2px 8px rgba(28,100,242,0.25); }
+    .btn:active { transform: scale(0.99); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+
+    .btn-inner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .spinner {
+      width: 15px;
+      height: 15px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Divider ── */
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 24px 0;
+    }
+
+    /* ── Footer ── */
+    .footer-note {
+      font-size: 12px;
+      color: var(--text-placeholder);
+      text-align: center;
+      line-height: 1.65;
+    }
+
+    .footer-note a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .footer-note a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <!-- Top navigation -->
+  <nav class="topnav">
+    <a href="https://thepublive.com" class="nav-logo">
+      <svg class="nav-logo-icon" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="28" height="28" rx="6" fill="#111827"/>
+        <circle cx="14" cy="14" r="5" stroke="white" stroke-width="2"/>
+        <circle cx="14" cy="14" r="2" fill="white"/>
+        <line x1="14" y1="6" x2="14" y2="3" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="14" y1="22" x2="14" y2="25" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="6" y1="14" x2="3" y2="14" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="22" y1="14" x2="25" y2="14" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <span class="nav-logo-text">publive</span>
+    </a>
+    <div class="nav-spacer"></div>
+    <a href="https://thepublive.com/contact-us" class="nav-link">Support</a>
+    <a href="https://app.thepublive.com" class="nav-btn">Dashboard →</a>
+  </nav>
+
+  <!-- Page content -->
+  <div class="page-body">
+    <div class="card">
+
+      <!-- Card header logo -->
+      <div class="card-logo">
+        <div class="card-logo-icon">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M9 2C5 2 2 5 2 9s3 7 7 7 7-3 7-7-3-7-7-7z" stroke="white" stroke-width="1.5"/>
+            <circle cx="9" cy="9" r="2.5" fill="white"/>
+          </svg>
+        </div>
+        <span class="card-logo-name">Publive</span>
+        <span class="card-logo-tag">MCP</span>
+      </div>
+
+      <h1>Authorize access</h1>
+      <p class="subtitle">Enter your Publive credentials to grant access via the CDS API.</p>
+
+      <!-- Steps guidance -->
+      <div class="steps">
+        <div class="steps-title">Where to find your credentials</div>
+        <div class="step">
+          <span class="step-num">1</span>
+          <span>Log in to your <strong>Publive Dashboard</strong></span>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span>Go to <strong>Configurations → API Developer Hub</strong></span>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span>Click <strong>View API credentials</strong></span>
+        </div>
+      </div>
+
+      <!-- Error box -->
+      <div class="error-box{% if not error %} hidden{% endif %}" id="errorBox">
+        <span>⚠</span>
+        <span>{% if error %}{{ error }}{% endif %}</span>
+      </div>
+
+      <!-- Form -->
+      <form method="post" id="authorizeForm">
+        {% csrf_token %}
+        <input type="hidden" name="client_id"             value="{{ client_id }}" />
+        <input type="hidden" name="redirect_uri"          value="{{ redirect_uri }}" />
+        <input type="hidden" name="state"                 value="{{ state }}" />
+        <input type="hidden" name="code_challenge"        value="{{ code_challenge }}" />
+        <input type="hidden" name="code_challenge_method" value="{{ code_challenge_method }}" />
+
+        <div class="field">
+          <label for="publisherId">Publisher ID</label>
+          <input type="text" id="publisherId" name="publisherId"
+                 placeholder="e.g. 1234" autocomplete="off" value="{{ publisherId }}" />
+          <div class="hint">Your numeric publisher identifier</div>
+        </div>
+
+        <div class="field">
+          <label for="apiKey">API Key</label>
+          <input type="text" id="apiKey" name="apiKey"
+                 placeholder="Your API Key" autocomplete="off" value="{{ apiKey }}" />
+        </div>
+
+        <div class="field">
+          <label for="apiSecret">API Secret</label>
+          <div class="password-wrap">
+            <input type="password" id="apiSecret" name="apiSecret"
+                   placeholder="Your API Secret" autocomplete="off" />
+            <button class="toggle-eye" id="toggleSecret" type="button" title="Show/hide">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+                <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button class="btn" id="authorizeBtn" type="submit">
+          <div class="btn-inner">
+            <div class="spinner" id="spinner"></div>
+            <span id="btnText">Authorize</span>
+          </div>
+        </button>
+      </form>
+
+      <hr class="divider" />
+
+      <p class="footer-note">
+        Credentials are stored in your session only and never saved to disk.<br />
+        <a href="https://thepublive.com/contact-us" target="_blank">Need help? Contact Publive →</a>
+      </p>
+
+    </div>
+  </div>
+
+  <script>
+    // Toggle password visibility
+    document.getElementById('toggleSecret').addEventListener('click', function () {
+      const input = document.getElementById('apiSecret');
+      const isHidden = input.type === 'password';
+      input.type = isHidden ? 'text' : 'password';
+      this.querySelector('svg').style.opacity = isHidden ? '0.5' : '1';
+    });
+
+    // Show loading on submit
+    document.getElementById('authorizeForm').addEventListener('submit', function () {
+      const btn     = document.getElementById('authorizeBtn');
+      const spinner = document.getElementById('spinner');
+      const btnText = document.getElementById('btnText');
+      btn.disabled = true;
+      spinner.style.display = 'block';
+      btnText.textContent = 'Verifying credentials…';
+    });
+  </script>
+</body>
+</html>
