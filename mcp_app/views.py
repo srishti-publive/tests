@@ -32,11 +32,16 @@ def _get_credentials(request):
 
 
 def _unauth(request):
-    base_url = getattr(settings, "BASE_URL", "http://localhost:8000")
-    return JsonResponse(
+    base_url = getattr(settings, "BASE_URL", "http://localhost:8000").rstrip("/")
+    resp = JsonResponse(
         {"error": "Not authenticated", "authUrl": f"{base_url}/connect"},
         status=401,
     )
+    resp["WWW-Authenticate"] = (
+        f'Bearer realm="{base_url}",'
+        f' resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+    )
+    return resp
 
 
 # ── JSON-RPC helpers ──────────────────────────────────────────────────────────
