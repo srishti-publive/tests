@@ -1,7 +1,7 @@
 import base64
 import requests
 
-_CDS_BASE = "https://cds.thepublive.com/publisher/{publisher_id}"
+_CDS_BASE = "https://cds-beta.thepublive.com/publisher/{publisher_id}"
 
 
 def cds_get(credentials, path, params=None):

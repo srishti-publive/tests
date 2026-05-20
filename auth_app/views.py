@@ -19,7 +19,7 @@ from .models import OAuthClient, OAuthCode, OAuthToken
 def _validate_cds(publisher_id, api_key, api_secret):
     token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     resp = requests.get(
-        f"https://cds.thepublive.com/publisher/{publisher_id}/publisher-data/",
+        f"https://cds-beta.thepublive.com/publisher/{publisher_id}/publisher-data/",
         headers={"Authorization": f"Basic {token}"},
         timeout=10,
     )
