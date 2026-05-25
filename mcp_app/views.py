@@ -1,7 +1,6 @@
 import json
 import queue
 import threading
-import time
 import uuid
 
 import newrelic.agent
@@ -11,7 +10,6 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .tools import TOOLS, call_tool
-from .langfuse_tracing import start_mcp_trace, record_tool_call
 
 # session_id → (Queue, credentials)  (shared across threads; single gunicorn worker required)
 _sessions: dict[str, tuple[queue.Queue, dict]] = {}
@@ -65,8 +63,6 @@ def _dispatch(body, credentials):
         return None  # notification — no response
 
     if method == "initialize":
-        publisher_id = (credentials or {}).get("publisherId", "unknown")
-        start_mcp_trace(publisher_id)
         return _ok(id_, {
             "protocolVersion": _PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
@@ -87,15 +83,10 @@ def _dispatch(body, credentials):
             ("tool_name", name),
         ])
 
-        t0 = time.perf_counter()
         try:
-            result      = call_tool(credentials, name, args)
-            duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            record_tool_call(publisher_id, name, args, result, None, duration_ms)
+            result = call_tool(credentials, name, args)
             return _ok(id_, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
         except Exception as exc:
-            duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-            record_tool_call(publisher_id, name, args, None, str(exc), duration_ms)
             return _ok(id_, {"content": [{"type": "text", "text": f"Error: {exc}"}], "isError": True})
 
     if method == "ping":
