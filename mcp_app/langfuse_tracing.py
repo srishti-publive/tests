@@ -51,9 +51,10 @@ def record_tool_call(
             start_mcp_trace(publisher_id)
 
         output_preview = str(result)[:500] if result is not None else None
+        level = "ERROR" if error else "DEFAULT"
 
         if hasattr(lf, "start_as_current_span"):
-            # Langfuse v3
+            # Langfuse v3 (>=3.x with OTel-based API)
             with lf.start_as_current_span(name=f"tools/call.{tool_name}") as span:
                 lf.update_current_trace(
                     name="mcp_session",
@@ -65,6 +66,21 @@ def record_tool_call(
                     output={"preview": output_preview} if output_preview else None,
                     metadata={"duration_ms": duration_ms, "error": error},
                 )
+
+        elif hasattr(lf, "start_span"):
+            # Langfuse v3 (early builds — no context manager yet)
+            span = lf.start_span(
+                name=f"tools/call.{tool_name}",
+                metadata={"publisher_id": publisher_id, "duration_ms": duration_ms, "error": error},
+            )
+            if hasattr(span, "update"):
+                span.update(
+                    input={"tool": tool_name, "args_keys": sorted(args.keys())},
+                    output={"preview": output_preview} if output_preview else None,
+                )
+            if hasattr(span, "end"):
+                span.end()
+
         elif hasattr(lf, "trace"):
             # Langfuse v2
             trace = lf.trace(
@@ -77,10 +93,15 @@ def record_tool_call(
                 input={"tool": tool_name, "args_keys": sorted(args.keys())},
                 output={"preview": output_preview} if output_preview else None,
                 metadata={"duration_ms": duration_ms, "error": error},
-                level="ERROR" if error else "DEFAULT",
+                level=level,
             )
+
         else:
-            logger.warning("Langfuse API not recognised — skipping trace")
+            import langfuse as _lf_mod
+            logger.warning(
+                "Langfuse API not recognised (version=%s) — skipping trace",
+                getattr(_lf_mod, "__version__", "unknown"),
+            )
             return
 
         lf.flush()
