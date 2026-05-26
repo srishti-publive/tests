@@ -80,9 +80,11 @@ def extract_prompt_for_tool_call(request, body: dict, params: dict) -> tuple[str
         return prompt_id, _truncate(preview), "tool_args", args
 
     # No arguments and no prompt from any source.
-    # Store the tool name as a placeholder so prompt_text is never blank in NR.
+    # The client (e.g. Claude desktop) called this tool without forwarding any
+    # user prompt context — this is expected MCP behaviour, not an error.
+    # Label is "client_not_provided" (not "none") so dashboards read clearly.
     tool_name = params.get("name", "unknown_tool")
-    return prompt_id, f"[{tool_name}]", "none", args
+    return prompt_id, f"[{tool_name}]", "client_not_provided", args
 
 
 def record_prompt_observability(

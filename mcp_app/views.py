@@ -33,7 +33,6 @@ _prompt_event_count = 0
 _prompt_event_window_start = time.monotonic()
 _prompt_event_lock = threading.Lock()
 
-
 def _should_emit_prompt_event() -> bool:
     """Return True if we are under the per-minute prompt-event budget."""
     global _prompt_event_count, _prompt_event_window_start
@@ -200,17 +199,28 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 "MCPPrompt event dropped (rate limit): tool=%s session=%s", name, session_id
             )
 
+        # Capture tool input args as a dedicated attribute — always set regardless
+        # of prompt_source so the Tool Call List NRQL has a reliable input field.
+        tool_input = json.dumps(args, ensure_ascii=False, default=str)[:500] if args else ""
+        add_attrs([
+            ("mcp.tool_name", name),
+            ("mcp.tool_input", tool_input),
+        ])
+
         t0 = time.perf_counter()
         try:
             result = call_tool(credentials, name, args)
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             set_txn_name(f"MCP/{name}", group="MCP")
-            result_size = len(json.dumps(result)) if result else 0
+            output_text = json.dumps(result, indent=2) if result else ""
+            result_size = len(output_text)
             add_attrs([
                 ("mcp.tool_result_status", "success"),
+                ("mcp.tool_is_error", False),
                 ("mcp.tool_args_count", len(args) if args else 0),
                 ("mcp.tool_response_size", result_size),
                 ("mcp.tool_duration_ms", duration_ms),
+                ("mcp.tool_output_preview", output_text[:500]),
             ])
             # Custom metric for per-tool latency and throughput (SLO-ready)
             newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/duration_ms", duration_ms)
@@ -219,15 +229,17 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 "MCP tools/call success: tool=%s duration_ms=%.2f response_size=%d",
                 name, duration_ms, result_size,
             )
-            return _ok(id_, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
+            return _ok(id_, {"content": [{"type": "text", "text": output_text}]})
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             set_txn_name(f"MCP/{name}", group="MCP")
             add_attrs([
                 ("mcp.tool_result_status", "error"),
+                ("mcp.tool_is_error", True),
                 ("mcp.tool_args_count", len(args) if args else 0),
                 ("mcp.tool_response_size", 0),
                 ("mcp.tool_duration_ms", duration_ms),
+                ("mcp.tool_output_preview", str(exc)[:500]),
             ])
             newrelic.agent.record_custom_metric("Custom/MCP/tool_error_count", 1)
             record_event("MCPToolError", {
@@ -239,6 +251,7 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 "prompt_id": prompt_id,
                 "prompt_text": prompt_text[:500],
                 "duration_ms": duration_ms,
+                "tool_input": tool_input,
             })
             logger.error(
                 "MCP tools/call error: tool=%s session=%s error=%s duration_ms=%.2f",
