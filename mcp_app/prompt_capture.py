@@ -79,7 +79,10 @@ def extract_prompt_for_tool_call(request, body: dict, params: dict) -> tuple[str
         preview = json.dumps(args, ensure_ascii=False, default=str)
         return prompt_id, _truncate(preview), "tool_args", args
 
-    return prompt_id, "", "none", args
+    # No arguments and no prompt from any source.
+    # Store the tool name as a placeholder so prompt_text is never blank in NR.
+    tool_name = params.get("name", "unknown_tool")
+    return prompt_id, f"[{tool_name}]", "none", args
 
 
 def record_prompt_observability(
