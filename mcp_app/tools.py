@@ -128,7 +128,7 @@ TOOLS = [
     },
     {
         "name": "get_publisher_data",
-        "description": "Get publisher profile: branding, logo, colors, social links, site metadata.",
+        "description": "Get publisher profile: branding, logo, accent colors, social links, app store URLs, and site metadata. Always call this first for any branding or publisher identity question — it automatically falls back to footer data if the primary endpoint is unavailable.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -162,7 +162,7 @@ TOOLS = [
     },
     {
         "name": "get_footer",
-        "description": "Get the footer configuration including logo, social links, app store URLs, menus, and copyright text.",
+        "description": "Get the footer layout: menus, links, copyright text, app store URLs, social links, and logo. Use this for footer structure and navigation links. For publisher branding questions (logo, colors, identity), prefer get_publisher_data which aggregates from multiple sources.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -242,7 +242,33 @@ def call_tool(credentials, name, args):
 
         if name == "get_publisher_data":
             with fn_trace("get_publisher_data", group="Tool"):
-                return cds_get(credentials, "/publisher-data/")
+                try:
+                    return cds_get(credentials, "/publisher-data/")
+                except Exception as exc:
+                    # CDS returns "Unknown Endpoint Path" for publishers where
+                    # /publisher-data/ is not configured. /footer/ carries the
+                    # same branding data (logo, colors, social links, app URLs).
+                    # Fall back silently so Claude gets the answer in one call.
+                    err_str = str(exc).lower()
+                    is_endpoint_missing = (
+                        "unknown endpoint" in err_str
+                        or "not found" in err_str
+                        or "http 404" in err_str
+                        or "no such" in err_str
+                    )
+                    if is_endpoint_missing:
+                        publisher_id = (credentials or {}).get("publisherId", "unknown")
+                        logger.warning(
+                            "get_publisher_data: /publisher-data/ unavailable for "
+                            "publisher=%s — falling back to /footer/",
+                            publisher_id,
+                        )
+                        add_attrs([
+                            ("mcp.tool_fallback", "footer"),
+                            ("mcp.tool_fallback_reason", "endpoint_unavailable"),
+                        ])
+                        return cds_get(credentials, "/footer/")
+                    raise
 
         if name == "identify_content":
             with fn_trace("identify_content", group="Tool"):
