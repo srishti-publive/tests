@@ -1,4 +1,11 @@
+import logging
+
+import newrelic.agent
+
 from .cds_client import cds_get
+from .nr_utils import add_attrs, fn_trace, notice_err
+
+logger = logging.getLogger(__name__)
 
 TOOLS = [
     {
@@ -188,68 +195,98 @@ TOOLS = [
 ]
 
 
+@newrelic.agent.function_trace(name="call_tool", group="Tool")
 def call_tool(credentials, name, args):
+    add_attrs([("mcp.tool_name", name)])
     args = args or {}
+    logger.debug("call_tool: tool=%s args_count=%d", name, len(args))
 
-    if name == "list_posts":
-        page  = args.pop("page",  None)
-        limit = args.pop("limit", None)
-        return cds_get(credentials, "/posts/", {"page": page, "limit": limit, **args})
+    try:
+        if name == "list_posts":
+            with fn_trace("list_posts", group="Tool"):
+                page  = args.pop("page",  None)
+                limit = args.pop("limit", None)
+                return cds_get(credentials, "/posts/", {"page": page, "limit": limit, **args})
 
-    if name == "get_post":
-        return cds_get(credentials, f"/post/{args['identifier']}/")
+        if name == "get_post":
+            with fn_trace("get_post", group="Tool"):
+                return cds_get(credentials, f"/post/{args['identifier']}/")
 
-    if name == "get_post_by_url":
-        return cds_get(credentials, "/post/", {"legacy_url": args["legacy_url"]})
+        if name == "get_post_by_url":
+            with fn_trace("get_post_by_url", group="Tool"):
+                return cds_get(credentials, "/post/", {"legacy_url": args["legacy_url"]})
 
-    if name == "list_categories":
-        return cds_get(credentials, "/categories/", {"page": args.get("page"), "limit": args.get("limit")})
+        if name == "list_categories":
+            with fn_trace("list_categories", group="Tool"):
+                return cds_get(credentials, "/categories/", {"page": args.get("page"), "limit": args.get("limit")})
 
-    if name == "get_category":
-        return cds_get(credentials, f"/category/{args['identifier']}/")
+        if name == "get_category":
+            with fn_trace("get_category", group="Tool"):
+                return cds_get(credentials, f"/category/{args['identifier']}/")
 
-    if name == "list_tags":
-        return cds_get(credentials, "/tags/", {"page": args.get("page"), "limit": args.get("limit")})
+        if name == "list_tags":
+            with fn_trace("list_tags", group="Tool"):
+                return cds_get(credentials, "/tags/", {"page": args.get("page"), "limit": args.get("limit")})
 
-    if name == "get_tag":
-        return cds_get(credentials, f"/tag/{args['identifier']}/")
+        if name == "get_tag":
+            with fn_trace("get_tag", group="Tool"):
+                return cds_get(credentials, f"/tag/{args['identifier']}/")
 
-    if name == "list_authors":
-        return cds_get(credentials, "/contributors/", {"page": args.get("page"), "limit": args.get("limit")})
+        if name == "list_authors":
+            with fn_trace("list_authors", group="Tool"):
+                return cds_get(credentials, "/contributors/", {"page": args.get("page"), "limit": args.get("limit")})
 
-    if name == "get_author":
-        return cds_get(credentials, f"/contributor/{args['identifier']}/")
+        if name == "get_author":
+            with fn_trace("get_author", group="Tool"):
+                return cds_get(credentials, f"/contributor/{args['identifier']}/")
 
-    if name == "get_publisher_data":
-        return cds_get(credentials, "/publisher-data/")
+        if name == "get_publisher_data":
+            with fn_trace("get_publisher_data", group="Tool"):
+                return cds_get(credentials, "/publisher-data/")
 
-    if name == "identify_content":
-        return cds_get(credentials, "/identify_url/", {"legacy_url": args["legacy_url"]})
+        if name == "identify_content":
+            with fn_trace("identify_content", group="Tool"):
+                return cds_get(credentials, "/identify_url/", {"legacy_url": args["legacy_url"]})
 
-    if name == "get_live_blog_updates":
-        return cds_get(credentials, f"/live-blog/{args['post_id']}/updates/", {
-            "page":  args.get("page"),
-            "limit": args.get("limit"),
-        })
+        if name == "get_live_blog_updates":
+            with fn_trace("get_live_blog_updates", group="Tool"):
+                return cds_get(credentials, f"/live-blog/{args['post_id']}/updates/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
-    if name == "get_navbar":
-        return cds_get(credentials, "/navbar/")
+        if name == "get_navbar":
+            with fn_trace("get_navbar", group="Tool"):
+                return cds_get(credentials, "/navbar/")
 
-    if name == "get_footer":
-        return cds_get(credentials, "/footer/")
+        if name == "get_footer":
+            with fn_trace("get_footer", group="Tool"):
+                return cds_get(credentials, "/footer/")
 
-    if name == "get_active_slots":
-        return cds_get(credentials, "/active-slots/")
+        if name == "get_active_slots":
+            with fn_trace("get_active_slots", group="Tool"):
+                return cds_get(credentials, "/active-slots/")
 
-    if name == "get_newsletter_groups":
-        return cds_get(credentials, "/newsletter-groups/")
+        if name == "get_newsletter_groups":
+            with fn_trace("get_newsletter_groups", group="Tool"):
+                return cds_get(credentials, "/newsletter-groups/")
 
-    if name == "get_content_types":
-        return cds_get(credentials, "/content-types/")
+        if name == "get_content_types":
+            with fn_trace("get_content_types", group="Tool"):
+                return cds_get(credentials, "/content-types/")
 
-    if name == "get_form_schema":
-        return cds_get(credentials, f"/form-schemas/{args['schema_id']}/", {
-            "page_source": args.get("page_source"),
-        })
+        if name == "get_form_schema":
+            with fn_trace("get_form_schema", group="Tool"):
+                return cds_get(credentials, f"/form-schemas/{args['schema_id']}/", {
+                    "page_source": args.get("page_source"),
+                })
 
-    raise Exception(f"Unknown tool: {name}")
+        logger.warning("call_tool: unknown tool requested: name=%s", name)
+        raise Exception(f"Unknown tool: {name}")
+    except Exception as exc:
+        logger.error("call_tool error: tool=%s error=%s", name, exc, exc_info=True)
+        notice_err(exc, [
+            ("error.layer", "tool"),
+            ("error.tool_name", name),
+        ])
+        raise
