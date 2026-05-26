@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import queue
@@ -59,6 +60,27 @@ def _get_credentials(request):
         except Exception:
             pass
     return request.session.get("credentials")
+
+
+def _get_session_id(request) -> str:
+    """Return a stable session identifier for this request.
+
+    Priority:
+    1. Django session key  — used by browser / session-cookie clients
+    2. SHA-256 prefix of Bearer token — used by OAuth clients (Claude AI, Cursor, etc.)
+       Same token across multiple HTTP requests in one conversation → same session ID.
+    3. Empty string fallback (should not happen after auth passes)
+    """
+    key = getattr(request.session, "session_key", None)
+    if key:
+        return key
+
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):]
+        return "oauth-" + hashlib.sha256(token.encode()).hexdigest()[:16]
+
+    return ""
 
 
 def _unauth(request):
@@ -324,9 +346,10 @@ def mcp_endpoint(request):
         # Streamable HTTP transport (MCP 2025-11-25)
         request_size = len(request.body)
         active_threads = threading.active_count()
+        session_id = _get_session_id(request)
         add_attrs([
             ("mcp.transport", "http"),
-            ("mcp.session_id", request.session.session_key or ""),
+            ("mcp.session_id", session_id),
             ("mcp.thread_active_count", active_threads),
             ("mcp.request_size_bytes", request_size),
         ])
@@ -339,8 +362,6 @@ def mcp_endpoint(request):
         except json.JSONDecodeError:
             logger.warning("MCP POST invalid JSON: size=%d", request_size)
             return JsonResponse({"error": "Invalid JSON"}, status=400)
-
-        session_id = request.session.session_key or ""
 
         try:
             if isinstance(body, list):
