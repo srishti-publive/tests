@@ -15,7 +15,9 @@ import json
 import uuid
 from typing import Optional, Tuple
 
-from .nr_utils import add_attrs, get_linking_metadata, record_event
+import newrelic.agent
+
+from .nr_utils import SERVER_ENV, SERVER_VERSION, add_attrs, get_linking_metadata, record_event
 
 MAX_PROMPT_LEN = 2000
 
@@ -46,10 +48,15 @@ def _prompt_from_meta(meta) -> Optional[Tuple[str, str]]:
     return None
 
 
+@newrelic.agent.function_trace(name="extract_prompt", group="MCP")
 def extract_prompt_for_tool_call(request, body: dict, params: dict) -> tuple[str, str, str, dict]:
     """
     Return (prompt_id, prompt_text, prompt_source, arguments).
     arguments may have _prompt / prompt removed so tools do not receive them.
+
+    Wrapped in a function trace so prompt-extraction time is visible in the APM
+    waterfall — large argument payloads or header scanning could add measurable
+    latency that was previously invisible.
     """
     prompt_id = str(uuid.uuid4())
     args = dict(params.get("arguments") or {})
@@ -141,4 +148,6 @@ def record_prompt_observability(
         "estimated_prompt_tokens": estimated_tokens,
         "trace_id": linking.get("trace.id", ""),
         "span_id": linking.get("span.id", ""),
+        "env": SERVER_ENV,
+        "server_version": SERVER_VERSION,
     })

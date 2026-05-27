@@ -16,7 +16,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from mcp_app.nr_utils import add_attrs, notice_err, set_txn_name
+from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 
 from .models import OAuthClient, OAuthCode, OAuthToken
 
@@ -98,6 +98,7 @@ def oauth_register(request):
             ("auth.redirect_uri_count", len(redirect_uris)),
             ("auth.result", "success"),
         ])
+        record_metric("Custom/Auth/client_registered_count", 1)
         logger.info("OAuth client registered: client_id=%s redirect_uris=%d", client_id, len(redirect_uris))
         return JsonResponse({
             "client_id": client_id,
@@ -159,6 +160,7 @@ def oauth_authorize(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "missing_params"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth authorize: missing params client=%s", client_id)
             ctx["error"] = "All fields are required."
             return render(request, "authorize.html", ctx)
@@ -170,6 +172,7 @@ def oauth_authorize(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "cds_auth_failed"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.error(
                 "OAuth authorize: CDS unreachable publisher=%s client=%s",
                 publisher_id, client_id, exc_info=True,
@@ -182,6 +185,7 @@ def oauth_authorize(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "cds_auth_failed"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning(
                 "OAuth authorize: invalid CDS credentials publisher=%s client=%s status=%d",
                 publisher_id, client_id, status_code,
@@ -247,6 +251,7 @@ def oauth_token(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "missing_params"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning(
                 "OAuth token: unsupported grant_type=%s client=%s",
                 data.get("grant_type"), data.get("client_id"),
@@ -263,6 +268,7 @@ def oauth_token(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "missing_params"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: unknown code client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "Unknown code"}, status=400)
 
@@ -272,6 +278,7 @@ def oauth_token(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "expired_token"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: expired code client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
 
@@ -283,6 +290,7 @@ def oauth_token(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "invalid_pkce"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
 
@@ -301,6 +309,7 @@ def oauth_token(request):
             ("auth.publisher_id", credentials.get("publisherId")),
             ("auth.client_id", oauth_client_id),
         ])
+        record_metric("Custom/Auth/token_issued_count", 1)
         logger.info(
             "OAuth token issued: publisher=%s client=%s",
             credentials.get("publisherId"), oauth_client_id,
@@ -355,6 +364,7 @@ def auth_login(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "missing_params"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("auth_login: missing params publisher=%s", publisher_id)
             return JsonResponse({"error": "All fields are required."}, status=400)
 
@@ -365,6 +375,7 @@ def auth_login(request):
                 ("auth.result", "failure"),
                 ("auth.failure_reason", "cds_auth_failed"),
             ])
+            record_metric("Custom/Auth/auth_failure_count", 1)
             logger.error(
                 "auth_login: CDS unreachable publisher=%s", publisher_id, exc_info=True
             )
@@ -382,6 +393,7 @@ def auth_login(request):
                 ("auth.result", "success"),
                 ("auth.publisher_id", publisher_id),
             ])
+            record_metric("Custom/Auth/session_login_count", 1)
             logger.info("auth_login: success publisher=%s", publisher_id)
             return JsonResponse({"success": True, "redirectTo": "/auth/success"})
 
@@ -389,6 +401,7 @@ def auth_login(request):
             ("auth.result", "failure"),
             ("auth.failure_reason", "cds_auth_failed"),
         ])
+        record_metric("Custom/Auth/auth_failure_count", 1)
         logger.warning(
             "auth_login: invalid credentials publisher=%s status=%d", publisher_id, status_code
         )

@@ -14,7 +14,11 @@ from django.http import HttpResponse, StreamingHttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
-from .nr_utils import add_attrs, get_linking_metadata, notice_err, record_event, set_txn_name
+from .nr_utils import (
+    SERVER_ENV, SERVER_VERSION,
+    add_attrs, get_linking_metadata, notice_err, record_event, record_metric,
+    set_txn_name, suppress_apdex, suppress_trace,
+)
 from .prompt_capture import extract_prompt_for_tool_call, record_prompt_observability
 from .tools import TOOLS, call_tool
 
@@ -38,6 +42,11 @@ _PROMPT_EVENT_MAX_PER_MIN = 1000
 _prompt_event_count = 0
 _prompt_event_window_start = time.monotonic()
 _prompt_event_lock = threading.Lock()
+
+# Maximum SSE message queue depth per session.  Without a bound a slow client
+# leaks unbounded memory.  Override via MCP_QUEUE_MAXSIZE env var.
+import os as _os
+_MCP_QUEUE_MAXSIZE = int(_os.environ.get("MCP_QUEUE_MAXSIZE", "100"))
 
 def _should_emit_prompt_event() -> bool:
     """Return True if we are under the per-minute prompt-event budget."""
@@ -66,6 +75,24 @@ _unauth_hits: dict[str, collections.deque] = collections.defaultdict(
     lambda: collections.deque()
 )
 _unauth_hits_lock = threading.Lock()
+
+
+# ── Client name normalisation ─────────────────────────────────────────────────
+# Maps the lower-cased first token of User-Agent to a human-readable name.
+# Without this, dashboards show raw UA fragments like "python-requests" or
+# "claude" instead of "Python Requests Client" or "Claude Desktop".
+_CLIENT_NAME_MAP: dict[str, str] = {
+    "claude":            "Claude Desktop",
+    "cursor":            "Cursor",
+    "anthropic":         "Anthropic SDK",
+    "python-requests":   "Python Requests Client",
+    "python-httpx":      "Python HTTPX Client",
+    "mcp":               "MCP Python SDK",
+    "node":              "Node.js MCP Client",
+    "go-http-client":    "Go MCP Client",
+    "axios":             "Axios (JS)",
+    "openai":            "OpenAI SDK",
+}
 
 
 def _get_client_ip(request) -> str:
@@ -128,7 +155,13 @@ def _classify_tool_error(exc) -> str:
     return "system_error"
 
 
+@newrelic.agent.function_trace(name="get_credentials", group="Auth")
 def _get_credentials(request):
+    """Resolve credentials from Bearer token (DB lookup) or session cookie.
+
+    Wrapped in a function trace so the OAuthToken DB query is visible in the
+    APM waterfall — previously this latency was invisible.
+    """
     auth_header = request.META.get("HTTP_AUTHORIZATION", "")
     if auth_header.startswith("Bearer "):
         token_value = auth_header[len("Bearer "):]
@@ -181,14 +214,17 @@ def _unauth(request):
 
 def _mcp_client_identity(request):
     ua = request.META.get("HTTP_USER_AGENT", "unknown")
-    client_name = ua
+    client_name = "unknown"
     client_version = "unknown"
     match = re.match(r"^([^\s/]+)/([^\s]+)", ua)
     if match:
-        client_name = match.group(1)
+        raw_name = match.group(1).lower()
         client_version = match.group(2)
+        # Normalise known clients; fall back to original casing when unknown.
+        client_name = _CLIENT_NAME_MAP.get(raw_name, match.group(1))
     elif ua and ua != "unknown":
-        client_name = ua.split()[0] if ua.split() else ua
+        raw_name = (ua.split()[0] if ua.split() else ua).lower()
+        client_name = _CLIENT_NAME_MAP.get(raw_name, ua.split()[0] if ua.split() else ua)
     return client_name, client_version
 
 
@@ -291,7 +327,9 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 credentials=credentials,
             )
         else:
-            # Budget exceeded: still set transaction attrs, skip the custom event
+            # Budget exceeded: still set transaction attrs, skip the custom event.
+            # Emit a metric so dashboards can show "how often is NR prompt observability
+            # degraded?" — a rising drop rate means the rate limit needs tuning.
             add_attrs([
                 ("mcp.prompt_id", prompt_id),
                 ("mcp.prompt_text", prompt_text),
@@ -299,6 +337,7 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 ("mcp.session_id", session_id or ""),
                 ("mcp.tool_name", name),
             ])
+            record_metric("Custom/MCP/prompt_event_dropped_count", 1)
             logger.warning(
                 "MCPPrompt event dropped (rate limit): tool=%s session=%s", name, session_id
             )
@@ -323,6 +362,9 @@ def _dispatch(body, credentials, request=None, session_id=None):
         _start_offset_ms = None
         _ai_think_time_ms = None
         _prompt_input_tokens = max(1, len(prompt_text) // 4)
+        # session_trace_id for cross-referencing MCPToolError/MCPToolDegraded events
+        # back to the session they belong to — without it these events are orphaned.
+        _session_trace_id_for_events = ""
 
         with _session_stats_lock:
             _disp_stats = _session_stats.get(session_id or "")
@@ -336,6 +378,7 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 # Capture AI client name on the first tool call that has a User-Agent.
                 if _disp_stats.get("client_name") is None and request is not None:
                     _disp_stats["client_name"] = request.META.get("HTTP_USER_AGENT", "unknown")[:200]
+                _session_trace_id_for_events = _disp_stats.get("session_trace_id", "")
 
         if _start_offset_ms is not None:
             add_attrs([("mcp.tool_start_offset_ms", _start_offset_ms)])
@@ -376,6 +419,8 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     _upd["total_estimated_input_tokens"]  = _upd.get("total_estimated_input_tokens", 0)  + _prompt_input_tokens
                     _upd["total_estimated_output_tokens"] = _upd.get("total_estimated_output_tokens", 0) + output_tokens
                     _upd["last_tool_end_perf"] = time.perf_counter()
+                    # Ordered list of tool names for session replay via MCPSessionSummary.
+                    _upd.setdefault("tool_sequence", []).append(name)
                     if is_degraded:
                         _upd["degraded_count"] = _upd.get("degraded_count", 0) + 1
 
@@ -399,6 +444,7 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     "publisher_id": (credentials or {}).get("publisherId", "unknown"),
                     "degraded_reason": degraded_reason,
                     "session_id": session_id or "",
+                    "session_trace_id": _session_trace_id_for_events,
                     "prompt_id": prompt_id,
                     "duration_ms": duration_ms,
                     "tool_input": tool_input,
@@ -406,6 +452,8 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     "span_id": _span_id,
                     "tool_start_offset_ms": _start_offset_ms or 0,
                     "ai_think_time_ms": _ai_think_time_ms or 0,
+                    "env": SERVER_ENV,
+                    "server_version": SERVER_VERSION,
                 })
                 logger.warning(
                     "MCP tools/call degraded: tool=%s reason=%s duration_ms=%.2f",
@@ -456,6 +504,8 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     _upd["total_tool_duration_ms"] = _upd.get("total_tool_duration_ms", 0.0) + duration_ms
                     _upd["total_estimated_input_tokens"] = _upd.get("total_estimated_input_tokens", 0) + _prompt_input_tokens
                     _upd["last_tool_end_perf"] = time.perf_counter()
+                    # Record tool in sequence even on error so replay is complete.
+                    _upd.setdefault("tool_sequence", []).append(name)
 
             newrelic.agent.record_custom_metric("Custom/MCP/tool_error_count", 1)
             newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/error_count", 1)
@@ -469,6 +519,7 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 "error_message": str(exc)[:500],
                 "error_category": error_category,
                 "session_id": session_id or "",
+                "session_trace_id": _session_trace_id_for_events,
                 "prompt_id": prompt_id,
                 "prompt_text": prompt_text[:500],
                 "duration_ms": duration_ms,
@@ -477,6 +528,8 @@ def _dispatch(body, credentials, request=None, session_id=None):
                 "span_id": _span_id,
                 "tool_start_offset_ms": _start_offset_ms or 0,
                 "ai_think_time_ms": _ai_think_time_ms or 0,
+                "env": SERVER_ENV,
+                "server_version": SERVER_VERSION,
             })
             logger.error(
                 "MCP tools/call error: tool=%s session=%s error_category=%s error=%s duration_ms=%.2f",
@@ -508,6 +561,8 @@ def _dispatch(body, credentials, request=None, session_id=None):
         "method": method,
         "session_id": session_id or "",
         "jsonrpc_id": str(id_) if id_ is not None else "",
+        "env": SERVER_ENV,
+        "server_version": SERVER_VERSION,
     })
     return _err(id_, -32601, f"Method not found: {method}")
 
@@ -547,6 +602,15 @@ def mcp_endpoint(request):
                 ("mcp.rate_limited", True),
                 ("mcp.client_ip", client_ip),
             ])
+            # Metric: long-retention counter for rate-limit volume dashboards + alerts.
+            record_metric("Custom/MCP/rate_limited_count", 1)
+            # Event: queryable by IP and time window so you can identify probe sources.
+            record_event("MCPRateLimit", {
+                "client_ip": client_ip,
+                "retry_after_seconds": int(retry_after),
+                "env": SERVER_ENV,
+                "server_version": SERVER_VERSION,
+            })
             resp = JsonResponse(
                 {"error": "Too many unauthenticated requests. Please authenticate first."},
                 status=429,
@@ -564,6 +628,11 @@ def mcp_endpoint(request):
         # Legacy SSE transport
         session_id = str(uuid.uuid4())
         set_txn_name("Transport/SSE", group="Transport")
+        # SSE sessions are long-lived (minutes to hours).  Suppress Apdex and
+        # slow-transaction traces so they don't pollute the APM overview page.
+        # All meaningful telemetry is captured via custom events and metrics.
+        suppress_apdex()
+        suppress_trace()
         active_threads = threading.active_count()
         publisher_id = (credentials or {}).get("publisherId", "unknown")
         add_attrs([
@@ -579,7 +648,9 @@ def mcp_endpoint(request):
         )
         # Register session BEFORE emitting SSESessionOpen so active_sessions_on_open
         # is defined.  (Previous ordering caused a NameError at runtime.)
-        msg_queue: queue.Queue = queue.Queue()
+        # Bounded queue: prevents a slow/disconnected client from leaking unbounded
+        # memory.  MCP_QUEUE_MAXSIZE env var (default 100) controls the ceiling.
+        msg_queue: queue.Queue = queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE)
         with _sessions_lock:
             _sessions[session_id] = (msg_queue, credentials)
             active_sessions_on_open = len(_sessions)
@@ -611,6 +682,9 @@ def mcp_endpoint(request):
                 "client_name": None,
                 # Stable session-level trace anchor for cross-transaction NRQL joins.
                 "session_trace_id": session_trace_id,
+                # Ordered list of tool names called this session — for MCPSessionSummary
+                # replay and "what did this AI session actually do?" debugging.
+                "tool_sequence": [],
             }
 
         newrelic.agent.record_custom_metric("Custom/MCP/active_sessions", active_sessions_on_open)
@@ -628,6 +702,8 @@ def mcp_endpoint(request):
             "active_sessions": active_sessions_on_open,
             "trace_id": session_trace_id,
             "span_id": session_open_linking.get("span.id", ""),
+            "env": SERVER_ENV,
+            "server_version": SERVER_VERSION,
         })
 
         base_url = getattr(settings, "BASE_URL", "http://localhost:8000").rstrip("/")
@@ -667,6 +743,9 @@ def mcp_endpoint(request):
                 total_output_tokens    = stats.get("total_estimated_output_tokens", 0)
                 session_client_name    = stats.get("client_name") or "unknown"
                 session_trace_id       = stats.get("session_trace_id", "")
+                # Compact ordered string: "list_posts,get_post,get_category" (max 500 chars)
+                # Enables session replay and "what did this AI session do?" debugging.
+                tool_sequence_str = ",".join(stats.get("tool_sequence", []))[:500]
 
                 # Derived: how much of the session wall time was active server work?
                 # The rest (duration_ms - total_tool_duration_ms) is AI think time + network.
@@ -676,6 +755,25 @@ def mcp_endpoint(request):
                 )
 
                 newrelic.agent.record_custom_metric("Custom/MCP/active_sessions", active_sessions_on_close)
+
+                # MCPSessionAbandoned: fires when a session opened but no tools were called.
+                # Captures misconfigured clients, auth probes, and network blips that never
+                # complete the MCP handshake → tool call flow.
+                if tool_call_count == 0:
+                    record_metric("Custom/MCP/session_abandon_count", 1)
+                    record_event("MCPSessionAbandoned", {
+                        "session_id": session_id,
+                        "publisher_id": publisher_id,
+                        "duration_ms": duration_ms,
+                        "session_client_name": session_client_name,
+                        "session_trace_id": session_trace_id,
+                        "env": SERVER_ENV,
+                        "server_version": SERVER_VERSION,
+                    })
+                    logger.info(
+                        "SSE session abandoned (0 tool calls): session=%s publisher=%s duration_ms=%.2f",
+                        session_id, publisher_id, duration_ms,
+                    )
 
                 # MCPSessionSummary: session-level rollup for per-session dashboards.
                 # Fires at close so it captures complete tool call and error counts.
@@ -694,8 +792,13 @@ def mcp_endpoint(request):
                     "session_client_name": session_client_name,
                     "session_trace_id": session_trace_id,
                     "active_sessions_remaining": active_sessions_on_close,
+                    # Ordered tool call sequence — enables session replay without
+                    # joining N separate Transaction records.
+                    "tool_sequence": tool_sequence_str,
+                    "env": SERVER_ENV,
+                    "server_version": SERVER_VERSION,
                 })
-                # CRITICAL FIX: use record_event() (no current_transaction() guard)
+                # Use record_event() (no current_transaction() guard)
                 # so this fires even after the WSGI transaction context has shifted.
                 record_event("SSESessionClose", {
                     "session_id": session_id,
@@ -706,6 +809,8 @@ def mcp_endpoint(request):
                     "tool_degraded_count": tool_degraded_count,
                     "total_tool_duration_ms": total_tool_duration_ms,
                     "session_trace_id": session_trace_id,
+                    "env": SERVER_ENV,
+                    "server_version": SERVER_VERSION,
                 })
                 logger.info(
                     "SSE session close: session=%s publisher=%s duration_ms=%.2f "
@@ -785,6 +890,14 @@ def mcp_message(request):
     if session_entry is None:
         logger.warning("mcp_message: no active SSE session: session_id=%s", session_id)
         add_attrs([("mcp.sse_session_missing", True)])
+        # Metric + event: makes cross-worker routing failures (session on worker A,
+        # mcp_message arriving at worker B) quantifiable in dashboards.
+        record_metric("Custom/MCP/sse_session_missing_count", 1)
+        record_event("MCPSessionMissing", {
+            "session_id": session_id,
+            "env": SERVER_ENV,
+            "server_version": SERVER_VERSION,
+        })
         return JsonResponse({"error": "No active MCP session."}, status=400)
 
     msg_queue, credentials = session_entry
@@ -838,7 +951,20 @@ def mcp_message(request):
         if response_msg is not None:
             # Enqueue as (enqueue_timestamp, message) so event_stream() can measure
             # how long the message waited before being consumed (queue wait time).
-            msg_queue.put((time.perf_counter(), response_msg))
+            # block=True, timeout=30 s: wait briefly for the client to drain before
+            # declaring overflow.  Dropping a tool response would confuse the AI client,
+            # so we prefer a short wait over silent loss.
+            try:
+                msg_queue.put((time.perf_counter(), response_msg), block=True, timeout=30.0)
+            except queue.Full:
+                record_metric("Custom/MCP/queue_overflow_count", 1)
+                add_attrs([("mcp.queue_overflow", True)])
+                logger.error(
+                    "MCP SSE queue full (maxsize=%d) after 30 s: session=%s — "
+                    "response dropped; client is not draining the SSE stream",
+                    _MCP_QUEUE_MAXSIZE, session_id,
+                )
+                return JsonResponse({"ok": True})
             # Queue depth: a growing queue means the client isn't draining the SSE
             # stream fast enough.  Alert when this stays consistently > 5.
             queue_depth = msg_queue.qsize()
