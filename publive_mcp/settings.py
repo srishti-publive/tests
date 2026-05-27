@@ -109,3 +109,51 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ── Structured JSON Logging ───────────────────────────────────────────────────
+# Emits every log line as a JSON object so New Relic Logs can index individual
+# fields (level, name, message) without custom parsing rules.
+# The NR agent automatically injects trace.id and span.id into each forwarded
+# log record, enabling direct APM-trace → Logs navigation in the NR UI.
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            # Include timestamp, level, logger name, and message as top-level JSON keys.
+            # Extra fields passed via logger.info("...", extra={...}) also appear here.
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        # Django internals: WARNING+ only (avoid noisy request/SQL logs in prod)
+        "django": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        # Application code: DEBUG in dev, INFO in prod
+        "mcp_app": {
+            "handlers": ["console"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+        "auth_app": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

@@ -39,6 +39,17 @@ def record_event(event_type: str, params: dict) -> None:
     _nr.record_custom_event(event_type, params)
 
 
+def get_linking_metadata() -> dict:
+    """Return current trace.id and span.id for custom event ↔ APM trace correlation.
+
+    Returns empty dict when called outside a transaction (e.g. from event_stream()).
+    Keys: "trace.id", "span.id", "entity.guid", "entity.name", "entity.type".
+    """
+    if _nr is None:
+        return {}
+    return _nr.get_linking_metadata()
+
+
 @contextlib.contextmanager
 def fn_trace(name: str, group: str = "Function"):
     txn = _current_transaction()

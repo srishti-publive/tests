@@ -8,3 +8,4 @@ python-dotenv==1.0.0
 newrelic
 django-redis>=5.4.0
 redis>=5.0.0
+python-json-logger>=2.0.7

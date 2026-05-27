@@ -15,7 +15,7 @@ import json
 import uuid
 from typing import Optional, Tuple
 
-from .nr_utils import add_attrs, record_event
+from .nr_utils import add_attrs, get_linking_metadata, record_event
 
 MAX_PROMPT_LEN = 2000
 
@@ -104,17 +104,29 @@ def record_prompt_observability(
     if request is not None:
         client_name = request.META.get("HTTP_USER_AGENT", "unknown")[:200]
 
+    # Proxy for AI token usage: character count ÷ 4 ≈ token count (GPT/Claude heuristic).
+    # This server is a tool server — actual token consumption happens in the AI client.
+    # These fields give a cost-proxy without requiring a tokenizer dependency.
+    char_count = len(prompt_text)
+    estimated_tokens = max(1, char_count // 4)
+
     pairs = [
         ("mcp.prompt_id", prompt_id),
         ("mcp.prompt_text", prompt_text),
         ("mcp.prompt_source", prompt_source),
         ("mcp.session_id", session_id or ""),
         ("mcp.tool_name", tool_name),
+        ("mcp.prompt_char_count", char_count),
+        ("mcp.estimated_prompt_tokens", estimated_tokens),
     ]
     if jsonrpc_id is not None:
         pairs.append(("mcp.jsonrpc_id", str(jsonrpc_id)))
 
     add_attrs(pairs)
+
+    # Linking metadata: attaches this event to its NR APM trace so you can click
+    # from an MCPPrompt event directly to the transaction trace waterfall.
+    linking = get_linking_metadata()
 
     record_event("MCPPrompt", {
         "prompt_id": prompt_id,
@@ -125,4 +137,8 @@ def record_prompt_observability(
         "publisher_id": publisher_id,
         "jsonrpc_id": str(jsonrpc_id) if jsonrpc_id is not None else "",
         "client_name": client_name,
+        "prompt_char_count": char_count,
+        "estimated_prompt_tokens": estimated_tokens,
+        "trace_id": linking.get("trace.id", ""),
+        "span_id": linking.get("span.id", ""),
     })
