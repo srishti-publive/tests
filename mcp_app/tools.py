@@ -378,7 +378,7 @@ def call_tool(credentials, name, args):
 
         if name == "get_live_blog_updates":
             with fn_trace("get_live_blog_updates", group="Tool"):
-                return cds_get(credentials, f"/post/{args['post_id']}/live-blog-update/", {
+                return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
                     "page":  args.get("page"),
                     "limit": args.get("limit"),
                 })
