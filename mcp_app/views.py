@@ -1,4 +1,3 @@
-import collections
 import hashlib
 import json
 import logging
@@ -62,21 +61,6 @@ def _should_emit_prompt_event() -> bool:
     return False
 
 
-# ── Unauthenticated-request rate limiter ──────────────────────────────────────
-# Limits the number of unauthenticated hits on /mcp per IP within a sliding
-# window.  Repeated probes or misconfigured clients get 429 instead of just 401
-# so that legitimate load is not wasted processing them.
-
-_UNAUTH_RATE_LIMIT  = 10    # max unauthenticated requests per IP per window
-_UNAUTH_RATE_WINDOW = 60.0  # sliding window in seconds
-
-# ip → deque of hit timestamps (monotonic)
-_unauth_hits: dict[str, collections.deque] = collections.defaultdict(
-    lambda: collections.deque()
-)
-_unauth_hits_lock = threading.Lock()
-
-
 # ── Client name normalisation ─────────────────────────────────────────────────
 # Maps the lower-cased first token of User-Agent to a human-readable name.
 # Without this, dashboards show raw UA fragments like "python-requests" or
@@ -93,47 +77,6 @@ _CLIENT_NAME_MAP: dict[str, str] = {
     "axios":             "Axios (JS)",
     "openai":            "OpenAI SDK",
 }
-
-
-def _get_client_ip(request) -> str:
-    """Return the real client IP, honouring X-Forwarded-For from Railway/proxies."""
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if forwarded:
-        # Leftmost entry is the original client; strip any trailing whitespace.
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "unknown")
-
-
-def _is_unauth_rate_limited(ip: str) -> tuple[bool, float]:
-    """Return (rate_limited, retry_after_seconds).
-
-    Records the hit if not yet limited.  Once an IP is over the threshold it
-    stays limited until old hits age out of the window naturally.
-
-    Opportunistically prunes stale (fully-aged-out) IP entries on each call to
-    prevent unbounded dict growth from one-time probe events.
-    """
-    now = time.monotonic()
-    cutoff = now - _UNAUTH_RATE_WINDOW
-    with _unauth_hits_lock:
-        dq = _unauth_hits[ip]
-        # Evict hits that have left the sliding window
-        while dq and dq[0] < cutoff:
-            dq.popleft()
-        if len(dq) >= _UNAUTH_RATE_LIMIT:
-            retry_after = dq[0] + _UNAUTH_RATE_WINDOW - now
-            return True, max(1.0, retry_after)
-        dq.append(now)
-        # Prune other IPs whose deques are fully empty (all hits aged out) so
-        # the dict doesn't grow forever after a probe wave.
-        stale = [k for k, v in _unauth_hits.items() if k != ip and not v]
-        for k in stale:
-            del _unauth_hits[k]
-        tracker_size = len(_unauth_hits)
-
-    # Emit as a metric so we can detect ongoing probe waves in NR dashboards.
-    newrelic.agent.record_custom_metric("Custom/MCP/unauth_tracker_size", tracker_size)
-    return False, 0.0
 
 
 def _classify_tool_error(exc) -> str:
@@ -606,35 +549,13 @@ def health_check(request):
 def mcp_endpoint(request):
     credentials = _get_credentials(request)
     if not credentials:
-        client_ip = _get_client_ip(request)
-        limited, retry_after = _is_unauth_rate_limited(client_ip)
-        if limited:
-            logger.warning(
-                "MCP unauthenticated request rate-limited: ip=%s retry_after=%.0fs",
-                client_ip, retry_after,
-            )
-            add_attrs([
-                ("mcp.rate_limited", True),
-                ("mcp.client_ip", client_ip),
-            ])
-            # Metric: long-retention counter for rate-limit volume dashboards + alerts.
-            record_metric("Custom/MCP/rate_limited_count", 1)
-            # Event: queryable by IP and time window so you can identify probe sources.
-            record_event("MCPRateLimit", {
-                "client_ip": client_ip,
-                "retry_after_seconds": int(retry_after),
-                "env": SERVER_ENV,
-                "server_version": SERVER_VERSION,
-            })
-            resp = JsonResponse(
-                {"error": "Too many unauthenticated requests. Please authenticate first."},
-                status=429,
-            )
-            resp["Retry-After"] = str(int(retry_after))
-            return resp
         logger.warning(
-            "MCP unauthenticated request: method=%s ip=%s", request.method, client_ip
+            "MCP authentication failed: method=%s",
+            request.method,
         )
+        add_attrs([
+            ("mcp.authenticated", False),
+        ])
         return _unauth(request)
 
     _add_mcp_client_attrs(request)
