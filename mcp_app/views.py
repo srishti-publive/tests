@@ -20,6 +20,7 @@ from .nr_utils import (
 )
 from .prompt_capture import extract_prompt_for_tool_call, record_prompt_observability
 from .tools import TOOLS, call_tool
+from .cms_tools import CMS_TOOLS, call_cms_tool
 
 logger = logging.getLogger(__name__)
 
@@ -243,8 +244,9 @@ def _dispatch(body, credentials, request=None, session_id=None):
 
     if method == "tools/list":
         set_txn_name("MCP/tools_list", group="MCP")
-        logger.debug("MCP tools/list: session=%s tool_count=%d", session_id, len(TOOLS))
-        return _ok(id_, {"tools": TOOLS})
+        all_tools = TOOLS + CMS_TOOLS
+        logger.debug("MCP tools/list: session=%s tool_count=%d", session_id, len(all_tools))
+        return _ok(id_, {"tools": all_tools})
 
     if method == "tools/call":
         params = body.get("params", {})
@@ -335,7 +337,10 @@ def _dispatch(body, credentials, request=None, session_id=None):
 
         t0 = time.perf_counter()
         try:
-            result = call_tool(credentials, name, args)
+            if name.startswith("cms_"):
+                result = call_cms_tool(credentials, name, args)
+            else:
+                result = call_tool(credentials, name, args)
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             set_txn_name(f"MCP/{name}", group="MCP")
             output_text = json.dumps(result, indent=2) if result else ""
