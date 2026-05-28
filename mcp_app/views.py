@@ -350,9 +350,14 @@ def _dispatch(body, credentials, request=None, session_id=None):
             ("mcp.tool_input", tool_input),
         ])
 
-        # Per-tool invocation counter — emitted before execution so it records
-        # even if the tool raises.  Use for tool-level call-rate alerts/dashboards.
-        newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/call_count", 1)
+        # Per-tool and global invocation counters — emitted before execution so they
+        # record on every outcome: success, degraded, and error.
+        record_metric(f"Custom/Tool/{name}/call_count", 1)
+        record_metric("Custom/MCP/tool_call_count", 1)
+        logger.debug(
+            "NR metric emitted: Custom/MCP/tool_call_count tool=%s session=%s",
+            name, session_id,
+        )
 
         # ── Session timeline attributes ───────────────────────────────────────
         # Read session start time and last-tool-end timestamp atomically.
@@ -436,9 +441,13 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     ("mcp.tool_output_preview", output_text[:500]),
                     ("mcp.tool_output_char_count", result_size),
                 ])
-                newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/degraded_count", 1)
-                newrelic.agent.record_custom_metric("Custom/MCP/tool_degraded_count", 1)
-                newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/duration_ms", duration_ms)
+                record_metric(f"Custom/Tool/{name}/degraded_count", 1)
+                record_metric("Custom/MCP/tool_degraded_count", 1)
+                record_metric(f"Custom/Tool/{name}/duration_ms", duration_ms)
+                logger.debug(
+                    "NR metric emitted: Custom/MCP/tool_degraded_count tool=%s reason=%s",
+                    name, degraded_reason,
+                )
                 record_event("MCPToolDegraded", {
                     "tool_name": name,
                     "publisher_id": (credentials or {}).get("publisherId", "unknown"),
@@ -469,12 +478,14 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     ("mcp.tool_output_preview", output_text[:500]),
                     ("mcp.tool_output_char_count", result_size),
                 ])
-                # Custom metrics for per-tool latency and throughput (SLO-ready)
-                newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/duration_ms", duration_ms)
-                newrelic.agent.record_custom_metric("Custom/MCP/tool_call_count", 1)
+                record_metric(f"Custom/Tool/{name}/duration_ms", duration_ms)
+                record_metric("Custom/MCP/tool_success_count", 1)
                 logger.info(
                     "MCP tools/call success: tool=%s duration_ms=%.2f response_size=%d",
                     name, duration_ms, result_size,
+                )
+                logger.debug(
+                    "NR metric emitted: Custom/MCP/tool_success_count tool=%s", name
                 )
 
             return _ok(id_, {"content": [{"type": "text", "text": output_text}]})
@@ -507,11 +518,15 @@ def _dispatch(body, credentials, request=None, session_id=None):
                     # Record tool in sequence even on error so replay is complete.
                     _upd.setdefault("tool_sequence", []).append(name)
 
-            newrelic.agent.record_custom_metric("Custom/MCP/tool_error_count", 1)
-            newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/error_count", 1)
+            record_metric("Custom/MCP/tool_error_count", 1)
+            record_metric(f"Custom/Tool/{name}/error_count", 1)
             # Duration metric on error path — enables p95/p99 latency for failed
             # calls separately from successful ones (timeout failures pull p99 up).
-            newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/error_duration_ms", duration_ms)
+            record_metric(f"Custom/Tool/{name}/error_duration_ms", duration_ms)
+            logger.debug(
+                "NR metric emitted: Custom/MCP/tool_error_count tool=%s category=%s",
+                name, error_category,
+            )
             record_event("MCPToolError", {
                 "tool_name": name,
                 "publisher_id": (credentials or {}).get("publisherId", "unknown"),

@@ -118,21 +118,11 @@ TOOLS = [
         },
     },
     {
-        "name": "list_authors",
-        "description": "List all authors with profile info and social links.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "page":  {"type": "integer"},
-                "limit": {"type": "integer"},
-            },
-        },
-    },
-    {
         "name": "get_author",
         "description": (
             "Get a single author by their numeric ID. "
-            "identifier must be a numeric author ID — use list_authors first to discover valid IDs. "
+            "identifier must be a numeric author ID. "
+            "To find posts by a specific author, use list_posts with the contributors.id__eq filter. "
             "Do not guess IDs or pass non-numeric values."
         ),
         "inputSchema": {
@@ -141,7 +131,7 @@ TOOLS = [
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Numeric author ID (e.g. \"42\"). Use list_authors to find valid IDs.",
+                    "description": "Numeric author ID (e.g. \"42\").",
                 },
             },
         },
@@ -308,8 +298,13 @@ def call_tool(credentials, name, args):
                 return cds_get(credentials, f"/tag/{args['identifier']}/")
 
         if name == "list_authors":
-            with fn_trace("list_authors", group="Tool"):
-                return cds_get(credentials, "/contributors/", {"page": args.get("page"), "limit": args.get("limit")})
+            return {
+                "error": "not_supported",
+                "message": (
+                    "Listing all authors is not supported by the CDS API. "
+                    "To find posts by a specific author, use list_posts with the contributors.id__eq filter."
+                ),
+            }
 
         if name == "get_author":
             with fn_trace("get_author", group="Tool"):
