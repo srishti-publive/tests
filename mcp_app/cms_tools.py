@@ -1,8 +1,17 @@
+import collections
 import logging
+import threading
 
+import newrelic.agent
+
+from .cds_client import cds_get
 from .cms_client import cms_delete, cms_get, cms_patch, cms_post
+from .nr_utils import add_attrs, fn_trace, notice_err, record_metric
 
 logger = logging.getLogger(__name__)
+
+_active_cms_tool_calls: dict[str, int] = collections.defaultdict(int)
+_active_cms_tool_calls_lock = threading.Lock()
 
 # ── Tool catalogue ────────────────────────────────────────────────────────────
 # 25 CMS tools covering 5 resources × 5 operations (list, retrieve, create,
@@ -280,6 +289,7 @@ CMS_TOOLS = [
                 "custom_published_at": {"type": "string",  "description": "Backdated publish timestamp ISO 8601"},
                 "scheduled_at":        {"type": "string",  "description": "Future publish date ISO 8601"},
                 "dry_run":             {"type": "boolean", "description": "true = show diff only, no changes (default); false = apply update"},
+                "confirm_publish":     {"type": "boolean", "description": "Must be true when setting status=Published with dry_run=false. Prevents accidental publishing."},
             },
         },
     },
@@ -378,6 +388,150 @@ CMS_TOOLS = [
                 "id":             {"type": "integer", "description": "The live blog update entry ID"},
                 "dry_run":        {"type": "boolean", "description": "true = preview only (default); false = delete (also requires confirm_delete=true)"},
                 "confirm_delete": {"type": "boolean", "description": "Must be explicitly set to true — together with dry_run=false — to execute the deletion"},
+            },
+        },
+    },
+
+    # ── Custom Components ─────────────────────────────────────────────────────
+
+    {
+        "name": "cms_list_custom_components",
+        "description": "List all custom components with pagination.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page":  {"type": "integer", "description": "Page number (default: 1, max: 1000)"},
+                "limit": {"type": "integer", "description": "Items per page (default: 10, max: 50)"},
+            },
+        },
+    },
+    {
+        "name": "cms_get_custom_component",
+        "description": "Retrieve a single custom component by ID.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Custom component ID"},
+            },
+        },
+    },
+    {
+        "name": "cms_create_custom_component",
+        "description": (
+            "Create a new custom component in the CMS. "
+            "dry_run=true (default): previews what will be created — no changes made. "
+            "dry_run=false: creates the component."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name":    {"type": "string",  "description": "Component name"},
+                "content": {"type": "string",  "description": "Component HTML/template content"},
+                "dry_run": {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
+            },
+        },
+    },
+    {
+        "name": "cms_update_custom_component",
+        "description": (
+            "Update an existing custom component. "
+            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
+            "dry_run=false: applies the update."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id":      {"type": "integer", "description": "Custom component ID"},
+                "name":    {"type": "string",  "description": "New component name"},
+                "content": {"type": "string",  "description": "New component HTML/template content"},
+                "dry_run": {"type": "boolean", "description": "true = show diff only, no changes (default); false = apply update"},
+            },
+        },
+    },
+    {
+        "name": "cms_delete_custom_component",
+        "description": (
+            "Permanently delete a custom component. This action CANNOT be undone. "
+            "dry_run=true (default): fetches and shows the component — no deletion. "
+            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id":             {"type": "integer", "description": "Custom component ID"},
+                "dry_run":        {"type": "boolean", "description": "true = preview only (default); false = delete (also requires confirm_delete=true)"},
+                "confirm_delete": {"type": "boolean", "description": "Must be explicitly set to true — together with dry_run=false — to execute the deletion"},
+            },
+        },
+    },
+
+    # ── Validation (read-only pre-flight checks) ──────────────────────────────
+
+    {
+        "name": "validate_media_exists",
+        "description": (
+            "Validation check — no changes made. "
+            "Checks whether a media asset with the given ID exists in the CMS library. "
+            "Returns {valid: true, id, filename, path} if found, "
+            "{valid: false, reason} if not."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Media asset ID to validate"},
+            },
+        },
+    },
+    {
+        "name": "validate_category_exists",
+        "description": (
+            "Validation check — no changes made. "
+            "Checks whether a category with the given ID exists in the CMS. "
+            "Returns {valid: true, id, name} if found, "
+            "{valid: false, reason} if not."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Category ID to validate"},
+            },
+        },
+    },
+    {
+        "name": "validate_author_exists",
+        "description": (
+            "Validation check — no changes made. "
+            "Checks whether a contributor/author with the given ID exists via the CDS. "
+            "Returns {valid: true, id, name} if found, "
+            "{valid: false, reason} if not."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer", "description": "Author/contributor ID to validate"},
+            },
+        },
+    },
+    {
+        "name": "validate_post_slug",
+        "description": (
+            "Validation check — no changes made. "
+            "Checks whether a post slug is available (not yet taken) in the CMS. "
+            "Returns {valid: true, slug, available: true} if the slug is free, "
+            "{valid: false, reason} if it is already taken by an existing post."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["slug"],
+            "properties": {
+                "slug": {"type": "string", "description": "URL slug to check for availability"},
             },
         },
     },
@@ -559,247 +713,382 @@ _CONFIRM_REQUIRED = {
 
 # ── Tool dispatcher ───────────────────────────────────────────────────────────
 
-def call_cms_tool(credentials: dict, name: str, args: dict):  # noqa: C901
+@newrelic.agent.function_trace(name="call_cms_tool", group="Tool")
+def call_cms_tool(credentials, name, args):  # noqa: C901
+    add_attrs([("mcp.tool_name", name)])
     args = args or {}
     logger.debug("call_cms_tool: tool=%s args_count=%d", name, len(args))
 
-    # ── Categories ────────────────────────────────────────────────────────────
+    with _active_cms_tool_calls_lock:
+        _active_cms_tool_calls[name] += 1
+        concurrency = _active_cms_tool_calls[name]
+    add_attrs([("mcp.tool_concurrency", concurrency)])
+    newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/active_calls", concurrency)
 
-    if name == "cms_list_categories":
-        return cms_get(credentials, "/category/", {
-            "page":  args.get("page"),
-            "limit": args.get("limit"),
-        })
+    try:
+        # ── Categories ────────────────────────────────────────────────────────
 
-    if name == "cms_get_category":
-        return cms_get(credentials, f"/category/{args['id']}/")
+        if name == "cms_list_categories":
+            with fn_trace("cms_list_categories", group="Tool"):
+                return cms_get(credentials, "/category/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
-    if name == "cms_create_category":
-        dry_run = args.get("dry_run", True)
-        payload  = {k: v for k, v in args.items() if k != "dry_run"}
-        if dry_run:
-            return {"dry_run": True, "preview": _preview_create("Category", payload)}
-        return cms_post(credentials, "/category/", payload)
+        if name == "cms_get_category":
+            with fn_trace("cms_get_category", group="Tool"):
+                return cms_get(credentials, f"/category/{args['id']}/")
 
-    if name == "cms_update_category":
-        dry_run     = args.get("dry_run", True)
-        category_id = args["id"]
-        changes     = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
-        if dry_run:
-            current = cms_get(credentials, f"/category/{category_id}/")
-            if "error_type" in current:
-                return current
-            return {"dry_run": True, "preview": _preview_update("Category", category_id, current, changes)}
-        return cms_patch(credentials, f"/category/{category_id}/", changes)
+        if name == "cms_create_category":
+            with fn_trace("cms_create_category", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Category", payload)}
+                return cms_post(credentials, "/category/", payload)
 
-    if name == "cms_delete_category":
-        dry_run        = args.get("dry_run", True)
-        confirm_delete = args.get("confirm_delete", False)
-        category_id    = args["id"]
-        if dry_run:
-            item = cms_get(credentials, f"/category/{category_id}/")
-            if "error_type" in item:
-                return item
-            return {"dry_run": True, "preview": _preview_delete(
-                "Category", category_id, item,
-                warning="Posts assigned to this category will lose their category assignment.",
-            )}
-        if not confirm_delete:
-            return _CONFIRM_REQUIRED
-        return cms_delete(credentials, f"/category/{category_id}/")
+        if name == "cms_update_category":
+            with fn_trace("cms_update_category", group="Tool"):
+                dry_run     = args.get("dry_run", True)
+                category_id = args["id"]
+                changes     = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
+                if dry_run:
+                    current = cms_get(credentials, f"/category/{category_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Category", category_id, current, changes)}
+                return cms_patch(credentials, f"/category/{category_id}/", changes)
 
-    # ── Tags ──────────────────────────────────────────────────────────────────
+        if name == "cms_delete_category":
+            with fn_trace("cms_delete_category", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                category_id    = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/category/{category_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete(
+                        "Category", category_id, item,
+                        warning="Posts assigned to this category will lose their category assignment.",
+                    )}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/category/{category_id}/")
 
-    if name == "cms_list_tags":
-        return cms_get(credentials, "/tag/", {
-            "page":  args.get("page"),
-            "limit": args.get("limit"),
-        })
+        # ── Tags ──────────────────────────────────────────────────────────────
 
-    if name == "cms_get_tag":
-        return cms_get(credentials, f"/tag/{args['id']}/")
+        if name == "cms_list_tags":
+            with fn_trace("cms_list_tags", group="Tool"):
+                return cms_get(credentials, "/tag/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
-    if name == "cms_create_tag":
-        dry_run = args.get("dry_run", True)
-        payload  = {k: v for k, v in args.items() if k != "dry_run"}
-        if dry_run:
-            return {"dry_run": True, "preview": _preview_create("Tag", payload)}
-        return cms_post(credentials, "/tag/", payload)
+        if name == "cms_get_tag":
+            with fn_trace("cms_get_tag", group="Tool"):
+                return cms_get(credentials, f"/tag/{args['id']}/")
 
-    if name == "cms_update_tag":
-        dry_run = args.get("dry_run", True)
-        tag_id  = args["id"]
-        changes = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
-        if dry_run:
-            current = cms_get(credentials, f"/tag/{tag_id}/")
-            if "error_type" in current:
-                return current
-            return {"dry_run": True, "preview": _preview_update("Tag", tag_id, current, changes)}
-        return cms_patch(credentials, f"/tag/{tag_id}/", changes)
+        if name == "cms_create_tag":
+            with fn_trace("cms_create_tag", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Tag", payload)}
+                return cms_post(credentials, "/tag/", payload)
 
-    if name == "cms_delete_tag":
-        dry_run        = args.get("dry_run", True)
-        confirm_delete = args.get("confirm_delete", False)
-        tag_id         = args["id"]
-        if dry_run:
-            item = cms_get(credentials, f"/tag/{tag_id}/")
-            if "error_type" in item:
-                return item
-            return {"dry_run": True, "preview": _preview_delete("Tag", tag_id, item)}
-        if not confirm_delete:
-            return _CONFIRM_REQUIRED
-        return cms_delete(credentials, f"/tag/{tag_id}/")
+        if name == "cms_update_tag":
+            with fn_trace("cms_update_tag", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                tag_id  = args["id"]
+                changes = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
+                if dry_run:
+                    current = cms_get(credentials, f"/tag/{tag_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Tag", tag_id, current, changes)}
+                return cms_patch(credentials, f"/tag/{tag_id}/", changes)
 
-    # ── Posts ─────────────────────────────────────────────────────────────────
+        if name == "cms_delete_tag":
+            with fn_trace("cms_delete_tag", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                tag_id         = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/tag/{tag_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete("Tag", tag_id, item)}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/tag/{tag_id}/")
 
-    if name == "cms_list_posts":
-        return cms_get(credentials, "/post/", {
-            "page":  args.get("page"),
-            "limit": args.get("limit"),
-        })
+        # ── Posts ─────────────────────────────────────────────────────────────
 
-    if name == "cms_get_post":
-        return cms_get(credentials, f"/post/{args['id']}/")
+        if name == "cms_list_posts":
+            with fn_trace("cms_list_posts", group="Tool"):
+                return cms_get(credentials, "/post/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
-    if name == "cms_create_post":
-        dry_run = args.get("dry_run", True)
-        payload  = {k: v for k, v in args.items() if k != "dry_run"}
-        if dry_run:
-            return {"dry_run": True, "preview": _preview_create("Post", payload)}
-        return cms_post(credentials, "/post/", payload)
+        if name == "cms_get_post":
+            with fn_trace("cms_get_post", group="Tool"):
+                return cms_get(credentials, f"/post/{args['id']}/")
 
-    if name == "cms_update_post":
-        dry_run = args.get("dry_run", True)
-        post_id = args["id"]
-        changes = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
-        if dry_run:
-            current = cms_get(credentials, f"/post/{post_id}/")
-            if "error_type" in current:
-                return current
-            return {"dry_run": True, "preview": _preview_update("Post", post_id, current, changes)}
-        return cms_patch(credentials, f"/post/{post_id}/", changes)
+        if name == "cms_create_post":
+            with fn_trace("cms_create_post", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Post", payload)}
+                return cms_post(credentials, "/post/", payload)
 
-    if name == "cms_delete_post":
-        dry_run        = args.get("dry_run", True)
-        confirm_delete = args.get("confirm_delete", False)
-        post_id        = args["id"]
-        if dry_run:
-            item = cms_get(credentials, f"/post/{post_id}/")
-            if "error_type" in item:
-                return item
-            return {"dry_run": True, "preview": _preview_delete(
-                "Post", post_id, item,
-                warning="This post and ALL its associated data will be permanently removed.",
-            )}
-        if not confirm_delete:
-            return _CONFIRM_REQUIRED
-        return cms_delete(credentials, f"/post/{post_id}/")
+        if name == "cms_update_post":
+            with fn_trace("cms_update_post", group="Tool"):
+                dry_run         = args.get("dry_run", True)
+                confirm_publish = args.get("confirm_publish", False)
+                post_id         = args["id"]
+                changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish")}
+                if dry_run:
+                    current = cms_get(credentials, f"/post/{post_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Post", post_id, current, changes)}
+                if changes.get("status") == "Published" and not confirm_publish:
+                    return {
+                        "error_type": "confirmation_required",
+                        "message": (
+                            "Publishing a post requires confirm_publish=true. "
+                            "Call again with dry_run=false AND confirm_publish=true to publish."
+                        ),
+                        "retryable": False,
+                    }
+                return cms_patch(credentials, f"/post/{post_id}/", changes)
 
-    # ── Live Blog Updates ─────────────────────────────────────────────────────
+        if name == "cms_delete_post":
+            with fn_trace("cms_delete_post", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                post_id        = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/post/{post_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete(
+                        "Post", post_id, item,
+                        warning="This post and ALL its associated data will be permanently removed.",
+                    )}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/post/{post_id}/")
 
-    if name == "cms_list_live_blog_updates":
-        post_id = args["post_id"]
-        return cms_get(credentials, f"/post/{post_id}/live-blog-update/")
+        # ── Live Blog Updates ─────────────────────────────────────────────────
 
-    if name == "cms_get_live_blog_update":
-        post_id   = args["post_id"]
-        update_id = args["id"]
-        return cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
+        if name == "cms_list_live_blog_updates":
+            with fn_trace("cms_list_live_blog_updates", group="Tool"):
+                post_id = args["post_id"]
+                return cms_get(credentials, f"/post/{post_id}/live-blog-update/")
 
-    if name == "cms_create_live_blog_update":
-        dry_run = args.get("dry_run", True)
-        post_id = args["post_id"]
-        payload = {k: v for k, v in args.items() if k not in ("dry_run", "post_id")}
-        if dry_run:
-            return {"dry_run": True, "preview": _preview_create(
-                "Live Blog Update",
-                {"post_id": post_id, **payload},
-            )}
-        return cms_post(credentials, f"/post/{post_id}/live-blog-update/", payload)
+        if name == "cms_get_live_blog_update":
+            with fn_trace("cms_get_live_blog_update", group="Tool"):
+                post_id   = args["post_id"]
+                update_id = args["id"]
+                return cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
 
-    if name == "cms_update_live_blog_update":
-        dry_run   = args.get("dry_run", True)
-        post_id   = args["post_id"]
-        update_id = args["id"]
-        changes   = {k: v for k, v in args.items() if k not in ("post_id", "id", "dry_run")}
-        if dry_run:
-            raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
-            if "error_type" in raw:
-                return raw
-            # The retrieve endpoint wraps the entry in a "data" key; flatten the
-            # nested content object so the diff shows title / content directly.
-            entry = raw.get("data", raw)
-            if isinstance(entry.get("content"), dict):
-                flat_current = {
-                    "title":   entry["content"].get("title"),
-                    "content": entry["content"].get("content"),
-                }
-            else:
-                flat_current = entry
-            return {"dry_run": True, "preview": _preview_update(
-                "Live Blog Update", update_id, flat_current, changes,
-            )}
-        return cms_patch(credentials, f"/post/{post_id}/live-blog-update/{update_id}/", changes)
+        if name == "cms_create_live_blog_update":
+            with fn_trace("cms_create_live_blog_update", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                post_id = args["post_id"]
+                payload = {k: v for k, v in args.items() if k not in ("dry_run", "post_id")}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create(
+                        "Live Blog Update",
+                        {"post_id": post_id, **payload},
+                    )}
+                return cms_post(credentials, f"/post/{post_id}/live-blog-update/", payload)
 
-    if name == "cms_delete_live_blog_update":
-        dry_run        = args.get("dry_run", True)
-        confirm_delete = args.get("confirm_delete", False)
-        post_id        = args["post_id"]
-        update_id      = args["id"]
-        if dry_run:
-            raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
-            if "error_type" in raw:
-                return raw
-            entry = raw.get("data", raw)
-            return {"dry_run": True, "preview": _preview_delete("Live Blog Update", update_id, entry)}
-        if not confirm_delete:
-            return _CONFIRM_REQUIRED
-        return cms_delete(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
+        if name == "cms_update_live_blog_update":
+            with fn_trace("cms_update_live_blog_update", group="Tool"):
+                dry_run   = args.get("dry_run", True)
+                post_id   = args["post_id"]
+                update_id = args["id"]
+                changes   = {k: v for k, v in args.items() if k not in ("post_id", "id", "dry_run")}
+                if dry_run:
+                    raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
+                    if "error_type" in raw:
+                        return raw
+                    # The retrieve endpoint wraps the entry in a "data" key; flatten the
+                    # nested content object so the diff shows title / content directly.
+                    entry = raw.get("data", raw)
+                    if isinstance(entry.get("content"), dict):
+                        flat_current = {
+                            "title":   entry["content"].get("title"),
+                            "content": entry["content"].get("content"),
+                        }
+                    else:
+                        flat_current = entry
+                    return {"dry_run": True, "preview": _preview_update(
+                        "Live Blog Update", update_id, flat_current, changes,
+                    )}
+                return cms_patch(credentials, f"/post/{post_id}/live-blog-update/{update_id}/", changes)
 
-    # ── Media Library ─────────────────────────────────────────────────────────
+        if name == "cms_delete_live_blog_update":
+            with fn_trace("cms_delete_live_blog_update", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                post_id        = args["post_id"]
+                update_id      = args["id"]
+                if dry_run:
+                    raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
+                    if "error_type" in raw:
+                        return raw
+                    entry = raw.get("data", raw)
+                    return {"dry_run": True, "preview": _preview_delete("Live Blog Update", update_id, entry)}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
 
-    if name == "cms_list_media":
-        return cms_get(credentials, "/media-library/", {
-            "page":  args.get("page"),
-            "limit": args.get("limit"),
-        })
+        # ── Media Library ─────────────────────────────────────────────────────
 
-    if name == "cms_get_media":
-        return cms_get(credentials, f"/media-library/{args['id']}/")
+        if name == "cms_list_media":
+            with fn_trace("cms_list_media", group="Tool"):
+                return cms_get(credentials, "/media-library/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
-    if name == "cms_create_media":
-        dry_run = args.get("dry_run", True)
-        payload  = {k: v for k, v in args.items() if k != "dry_run"}
-        if dry_run:
-            return {"dry_run": True, "preview": _preview_create("Media", payload)}
-        return cms_post(credentials, "/media-library/", payload)
+        if name == "cms_get_media":
+            with fn_trace("cms_get_media", group="Tool"):
+                return cms_get(credentials, f"/media-library/{args['id']}/")
 
-    if name == "cms_update_media":
-        dry_run  = args.get("dry_run", True)
-        media_id = args["id"]
-        changes  = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
-        if dry_run:
-            current = cms_get(credentials, f"/media-library/{media_id}/")
-            if "error_type" in current:
-                return current
-            return {"dry_run": True, "preview": _preview_update("Media", media_id, current, changes)}
-        return cms_patch(credentials, f"/media-library/{media_id}/", changes)
+        if name == "cms_create_media":
+            with fn_trace("cms_create_media", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Media", payload)}
+                return cms_post(credentials, "/media-library/", payload)
 
-    if name == "cms_delete_media":
-        dry_run        = args.get("dry_run", True)
-        confirm_delete = args.get("confirm_delete", False)
-        media_id       = args["id"]
-        if dry_run:
-            item = cms_get(credentials, f"/media-library/{media_id}/")
-            if "error_type" in item:
-                return item
-            return {"dry_run": True, "preview": _preview_delete(
-                "Media", media_id, item,
-                warning="Posts referencing this media will lose their associated image or file.",
-            )}
-        if not confirm_delete:
-            return _CONFIRM_REQUIRED
-        return cms_delete(credentials, f"/media-library/{media_id}/")
+        if name == "cms_update_media":
+            with fn_trace("cms_update_media", group="Tool"):
+                dry_run  = args.get("dry_run", True)
+                media_id = args["id"]
+                changes  = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
+                if dry_run:
+                    current = cms_get(credentials, f"/media-library/{media_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Media", media_id, current, changes)}
+                return cms_patch(credentials, f"/media-library/{media_id}/", changes)
 
-    logger.warning("call_cms_tool: unknown tool: name=%s", name)
-    raise Exception(f"Unknown CMS tool: {name}")
+        if name == "cms_delete_media":
+            with fn_trace("cms_delete_media", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                media_id       = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/media-library/{media_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete(
+                        "Media", media_id, item,
+                        warning="Posts referencing this media will lose their associated image or file.",
+                    )}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/media-library/{media_id}/")
+
+        # ── Custom Components ─────────────────────────────────────────────────
+
+        if name == "cms_list_custom_components":
+            with fn_trace("cms_list_custom_components", group="Tool"):
+                return cms_get(credentials, "/custom-component/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
+
+        if name == "cms_get_custom_component":
+            with fn_trace("cms_get_custom_component", group="Tool"):
+                return cms_get(credentials, f"/custom-component/{args['id']}/")
+
+        if name == "cms_create_custom_component":
+            with fn_trace("cms_create_custom_component", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Custom Component", payload)}
+                return cms_post(credentials, "/custom-component/", payload)
+
+        if name == "cms_update_custom_component":
+            with fn_trace("cms_update_custom_component", group="Tool"):
+                dry_run      = args.get("dry_run", True)
+                component_id = args["id"]
+                changes      = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
+                if dry_run:
+                    current = cms_get(credentials, f"/custom-component/{component_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Custom Component", component_id, current, changes)}
+                return cms_patch(credentials, f"/custom-component/{component_id}/", changes)
+
+        if name == "cms_delete_custom_component":
+            with fn_trace("cms_delete_custom_component", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                component_id   = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/custom-component/{component_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete("Custom Component", component_id, item)}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/custom-component/{component_id}/")
+
+        # ── Validation ────────────────────────────────────────────────────────
+
+        if name == "validate_media_exists":
+            with fn_trace("validate_media_exists", group="Tool"):
+                media_id = args["id"]
+                result = cms_get(credentials, f"/media-library/{media_id}/")
+                if "error_type" in result:
+                    return {"valid": False, "reason": f"Media ID {media_id} not found."}
+                return {"valid": True, "id": media_id, "filename": result.get("filename"), "path": result.get("path")}
+
+        if name == "validate_category_exists":
+            with fn_trace("validate_category_exists", group="Tool"):
+                category_id = args["id"]
+                result = cms_get(credentials, f"/category/{category_id}/")
+                if "error_type" in result:
+                    return {"valid": False, "reason": f"Category ID {category_id} not found."}
+                return {"valid": True, "id": category_id, "name": result.get("name")}
+
+        if name == "validate_author_exists":
+            with fn_trace("validate_author_exists", group="Tool"):
+                author_id = args["id"]
+                result = cds_get(credentials, f"/contributor/{author_id}/")
+                if "error_type" in result:
+                    return {"valid": False, "reason": f"Author ID {author_id} not found."}
+                return {"valid": True, "id": author_id, "name": result.get("name")}
+
+        if name == "validate_post_slug":
+            with fn_trace("validate_post_slug", group="Tool"):
+                slug = args["slug"]
+                result = cms_get(credentials, f"/post/{slug}/")
+                if "error_type" in result:
+                    return {"valid": True, "slug": slug, "available": True}
+                return {"valid": False, "reason": f"Slug '{slug}' is already taken by post ID {result.get('id')}."}
+
+        logger.warning("call_cms_tool: unknown tool: name=%s", name)
+        raise Exception(f"Unknown CMS tool: {name}")
+
+    except Exception as exc:
+        notice_err(exc, [
+            ("error.layer", "cms_tool"),
+            ("error.tool_name", name),
+        ])
+        raise
+    finally:
+        with _active_cms_tool_calls_lock:
+            _active_cms_tool_calls[name] = max(0, _active_cms_tool_calls[name] - 1)

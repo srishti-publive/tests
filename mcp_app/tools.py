@@ -118,6 +118,17 @@ TOOLS = [
         },
     },
     {
+        "name": "list_authors",
+        "description": "List all authors/contributors for this publication with pagination.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page":  {"type": "integer", "description": "Page number (default: 1, max: 1000)"},
+                "limit": {"type": "integer", "description": "Items per page (default: 10, max: 50)"},
+            },
+        },
+    },
+    {
         "name": "get_author",
         "description": (
             "Get a single author by their numeric ID. "
@@ -162,6 +173,22 @@ TOOLS = [
                 "post_id": {"type": "integer", "description": "LiveBlog post ID"},
                 "page":    {"type": "integer"},
                 "limit":   {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "get_trending_posts",
+        "description": (
+            "Get top-performing posts ranked by page views over a time window. "
+            "Requires Publive analytics to be active. Rankings refresh every 5-10 minutes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "duration": {"type": "string",  "description": "Analytics window: 24h (default), 7d, or 30d"},
+                "limit":    {"type": "integer", "description": "Items per page (default: 20, max: 50)"},
+                "page":     {"type": "integer", "description": "Page number (default: 1)"},
+                "type__eq": {"type": "string",  "description": "Filter by post type: Article, Video, Web Story, Gallery, LiveBlog, CustomPage, CustomEntity, or Newsletter"},
             },
         },
     },
@@ -298,13 +325,11 @@ def call_tool(credentials, name, args):
                 return cds_get(credentials, f"/tag/{args['identifier']}/")
 
         if name == "list_authors":
-            return {
-                "error": "not_supported",
-                "message": (
-                    "Listing all authors is not supported by the CDS API. "
-                    "To find posts by a specific author, use list_posts with the contributors.id__eq filter."
-                ),
-            }
+            with fn_trace("list_authors", group="Tool"):
+                return cds_get(credentials, "/contributors/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
 
         if name == "get_author":
             with fn_trace("get_author", group="Tool"):
@@ -381,6 +406,15 @@ def call_tool(credentials, name, args):
                 return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
                     "page":  args.get("page"),
                     "limit": args.get("limit"),
+                })
+
+        if name == "get_trending_posts":
+            with fn_trace("get_trending_posts", group="Tool"):
+                return cds_get(credentials, "/posts/trending/", {
+                    "duration": args.get("duration"),
+                    "limit":    args.get("limit"),
+                    "page":     args.get("page"),
+                    "type":     args.get("type__eq"),
                 })
 
         if name == "get_navbar":

@@ -24,8 +24,8 @@ from .cms_tools import CMS_TOOLS, call_cms_tool
 
 logger = logging.getLogger(__name__)
 
-# session_id → (Queue, credentials)  (shared across threads; single gunicorn worker required)
-_sessions: dict[str, tuple[queue.Queue, dict]] = {}
+# session_id → (Queue, credentials, token_expires_at)  (shared across threads; single gunicorn worker required)
+_sessions: dict[str, tuple[queue.Queue, dict, object]] = {}
 _sessions_lock = threading.Lock()
 
 # session_id → {"tool_count": int, "error_count": int}
@@ -113,10 +113,10 @@ def _get_credentials(request):
             from auth_app.models import OAuthToken
             oauth_token = OAuthToken.objects.get(token=token_value)
             if oauth_token.expires_at >= timezone.now():
-                return oauth_token.credentials
+                return oauth_token.credentials, oauth_token.expires_at
         except Exception:
             pass
-    return request.session.get("credentials")
+    return request.session.get("credentials"), None
 
 
 def _get_session_id(request) -> str:
@@ -218,7 +218,7 @@ def _err(id_, code, message):
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
 
-def _dispatch(body, credentials, request=None, session_id=None):
+def _dispatch(body, credentials, request=None, session_id=None, token_expires_at=None):
     method = body.get("method", "")
     id_    = body.get("id")
 
@@ -236,11 +236,14 @@ def _dispatch(body, credentials, request=None, session_id=None):
         if request is not None:
             request.session[_SESSION_PROTOCOL_KEY] = _PROTOCOL_VERSION
         logger.info("MCP initialize: session=%s protocol=%s", session_id, _PROTOCOL_VERSION)
-        return _ok(id_, {
+        result = {
             "protocolVersion": _PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "publive-cds", "version": "1.0.0"},
-        })
+        }
+        if token_expires_at is not None:
+            result["tokenExpiresAt"] = token_expires_at.isoformat()
+        return _ok(id_, result)
 
     if method == "tools/list":
         set_txn_name("MCP/tools_list", group="MCP")
@@ -335,6 +338,34 @@ def _dispatch(body, credentials, request=None, session_id=None):
         if _ai_think_time_ms is not None:
             add_attrs([("mcp.ai_think_time_ms", _ai_think_time_ms)])
 
+        # ── CMS write-op rate limit ───────────────────────────────────────────
+        # Enforced on SSE sessions only (_session_stats has an entry).
+        # HTTP transport requests are stateless — _session_stats won't contain
+        # their session_id, so _write_stats is None and the check is skipped.
+        _is_cms_write = (
+            name.startswith("cms_")
+            and not name.startswith("cms_list_")
+            and not name.startswith("cms_get_")
+            and not name.startswith("validate_")
+        )
+        if _is_cms_write:
+            with _session_stats_lock:
+                _write_stats = _session_stats.get(session_id or "")
+                if _write_stats is not None:
+                    _write_stats["write_op_count"] += 1
+                    _write_op_count = _write_stats["write_op_count"]
+                else:
+                    _write_op_count = 0
+            if _write_op_count > 50:
+                return _ok(id_, {"content": [{"type": "text", "text": json.dumps({
+                    "error_type": "rate_limit",
+                    "message": (
+                        "Write operation limit (50) reached for this session. "
+                        "Start a new session to continue making changes."
+                    ),
+                    "retryable": False,
+                })}]})
+
         t0 = time.perf_counter()
         try:
             if name.startswith("cms_"):
@@ -361,7 +392,10 @@ def _dispatch(body, credentials, request=None, session_id=None):
             # auth_expired).  These complete without raising, so they land here looking
             # like successes.  Distinguish them explicitly so NR dashboards can show
             # "clean success", "degraded", and "error" as separate series.
-            degraded_reason = result.get("error") if isinstance(result, dict) else None
+            if isinstance(result, dict):
+                degraded_reason = result.get("error") or result.get("error_type")
+            else:
+                degraded_reason = None
             is_degraded = bool(degraded_reason)
 
             # Update session-level accumulators regardless of degraded/success.
@@ -552,7 +586,7 @@ def health_check(request):
 @csrf_exempt
 @newrelic.agent.function_trace(name="mcp_endpoint", group="Transport")
 def mcp_endpoint(request):
-    credentials = _get_credentials(request)
+    credentials, token_expires_at = _get_credentials(request)
     if not credentials:
         logger.warning(
             "MCP authentication failed: method=%s",
@@ -593,7 +627,7 @@ def mcp_endpoint(request):
         # memory.  MCP_QUEUE_MAXSIZE env var (default 100) controls the ceiling.
         msg_queue: queue.Queue = queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE)
         with _sessions_lock:
-            _sessions[session_id] = (msg_queue, credentials)
+            _sessions[session_id] = (msg_queue, credentials, token_expires_at)
             active_sessions_on_open = len(_sessions)
         # Capture the SSE-open trace.id so it can be stamped on every subsequent
         # mcp_message transaction for this session.  Allows:
@@ -626,6 +660,9 @@ def mcp_endpoint(request):
                 # Ordered list of tool names called this session — for MCPSessionSummary
                 # replay and "what did this AI session actually do?" debugging.
                 "tool_sequence": [],
+                # Running count of CMS write ops (create/update/delete) this session.
+                # Used to enforce the per-session write-op rate limit.
+                "write_op_count": 0,
             }
 
         newrelic.agent.record_custom_metric("Custom/MCP/active_sessions", active_sessions_on_open)
@@ -789,12 +826,12 @@ def mcp_endpoint(request):
             if isinstance(body, list):
                 logger.debug("MCP batch request: count=%d session=%s", len(body), session_id)
                 responses = [
-                    r for r in (_dispatch(msg, credentials, request, session_id) for msg in body)
+                    r for r in (_dispatch(msg, credentials, request, session_id, token_expires_at) for msg in body)
                     if r is not None
                 ]
                 return JsonResponse(responses, safe=False) if responses else HttpResponse(status=202)
 
-            response = _dispatch(body, credentials, request, session_id)
+            response = _dispatch(body, credentials, request, session_id, token_expires_at)
             if response is None:
                 return HttpResponse(status=202)
             return JsonResponse(response)
@@ -841,7 +878,7 @@ def mcp_message(request):
         })
         return JsonResponse({"error": "No active MCP session."}, status=400)
 
-    msg_queue, credentials = session_entry
+    msg_queue, credentials, token_expires_at = session_entry
 
     # Stamp the session-level trace anchor on every mcp_message transaction so
     # you can find all transactions in a session with:
@@ -875,7 +912,7 @@ def mcp_message(request):
             add_attrs([("mcp.session_tool_seq", seq)])
 
     try:
-        response_msg = _dispatch(body, credentials, request, session_id)
+        response_msg = _dispatch(body, credentials, request, session_id, token_expires_at)
 
         # Track tool errors at session level for MCPSessionSummary
         if (

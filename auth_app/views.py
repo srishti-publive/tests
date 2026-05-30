@@ -451,8 +451,16 @@ def auth_status(request):
 
 @csrf_exempt
 @require_http_methods(["POST"])
+@newrelic.agent.function_trace(name="auth_logout", group="Auth")
 def auth_logout(request):
+    set_txn_name("Auth/session_logout", group="Auth")
     publisher_id = (request.session.get("credentials") or {}).get("publisherId", "unknown")
     request.session.flush()
+    add_attrs([
+        ("auth.flow", "session"),
+        ("auth.result", "success"),
+        ("auth.publisher_id", publisher_id),
+    ])
+    record_metric("Custom/Auth/session_logout_count", 1)
     logger.info("auth_logout: publisher=%s", publisher_id)
     return JsonResponse({"success": True})
