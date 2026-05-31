@@ -285,7 +285,7 @@ CMS_TOOLS = [
             "required": ["title", "english_title", "type", "status", "primary_category"],
             "properties": {
                 "title":               {"type": "string",  "description": "Post headline"},
-                "english_title":       {"type": "string",  "description": "English headline — used for slug generation. Immutable after creation."},
+                "english_title":       {"type": "string",  "description": "Plain English headline used for slug generation — pass the title text as-is, NOT a pre-formatted slug (e.g. 'India vs Australia Trophy' not 'india-vs-australia-trophy'). Immutable after creation."},
                 "type":                {"type": "string",  "description": "Post type: Article, Video, Web Story, Gallery, LiveBlog, CustomPage, BlankPage. Immutable after creation."},
                 "status":              {"type": "string",  "description": "Draft, Published, Scheduled, or Approval Pending"},
                 "primary_category":    {"type": "integer", "description": "Primary category ID"},

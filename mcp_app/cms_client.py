@@ -75,12 +75,25 @@ def _handle_error(exc, url):
         msg = f"HTTP {http_status}"
         try:
             data = exc.response.json()
+            # Try standard error envelope fields first
             msg = (
                 data.get("detail")
                 or data.get("message")
                 or (data.get("error") or {}).get("description")
                 or msg
             )
+            # DRF field-level validation errors look like {"field": ["msg", ...]}
+            # If none of the standard keys matched, extract and surface them so the
+            # AI knows exactly which field was rejected and why.
+            if msg == f"HTTP {http_status}" and isinstance(data, dict):
+                field_errors = []
+                for key, val in data.items():
+                    if isinstance(val, list):
+                        field_errors.append(f"{key}: {', '.join(str(v) for v in val)}")
+                    elif isinstance(val, str):
+                        field_errors.append(f"{key}: {val}")
+                if field_errors:
+                    msg = "Validation error — " + "; ".join(field_errors)
         except Exception:
             pass
         return {
