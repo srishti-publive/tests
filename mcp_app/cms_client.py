@@ -73,7 +73,9 @@ def _handle_error(exc, url):
         }
     if http_status and 400 <= http_status < 500:
         msg = f"HTTP {http_status}"
+        raw_body = ""
         try:
+            raw_body = exc.response.text[:1000]
             data = exc.response.json()
             # Try standard error envelope fields first
             msg = (
@@ -96,9 +98,14 @@ def _handle_error(exc, url):
                     msg = "Validation error — " + "; ".join(field_errors)
         except Exception:
             pass
+        logger.warning(
+            "cms_client 4xx: url=%s status=%d raw_body=%s",
+            url, http_status, raw_body,
+        )
         return {
             "error_type": "bad_request",
             "message": msg,
+            "raw_api_response": raw_body,
             "retryable": False,
         }
     if http_status and 500 <= http_status < 600:

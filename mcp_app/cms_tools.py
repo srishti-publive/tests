@@ -272,24 +272,27 @@ CMS_TOOLS = [
         "name": "cms_create_post",
         "description": (
             "Create a new post in the CMS. "
-            "BEFORE calling: collect all required fields from the user — title, english_title, type, status, primary_category. "
-            "Ask for optional fields (content, tags, banner_url, etc.) based on user intent before calling. "
+            "BEFORE calling: you MUST have all six required fields — title, english_title, type, status, "
+            "primary_category, AND contributors (at least one author ID). "
+            "contributors is REQUIRED by the API — omitting it causes a hard validation failure. "
+            "If the user has not provided an author ID, call list_authors first to get one, then ask the user to confirm. "
+            "english_title must be plain English text matching the title, NOT a pre-slugified string. "
             "DRAFT posts (status=Draft): created immediately — no preview step, safe because drafts are reversible. "
             "PUBLISHED/SCHEDULED/APPROVAL PENDING posts: "
-            "dry_run=true (default) shows a full preview of what will be created — no changes made. "
+            "dry_run=true (default) shows a full preview — no changes made. "
             "Show the preview to the user and ask them to confirm, then call again with dry_run=false to create. "
             "Immutable after creation: english_title, type, slug, meta_data, custom_published_at."
         ),
         "inputSchema": {
             "type": "object",
-            "required": ["title", "english_title", "type", "status", "primary_category"],
+            "required": ["title", "english_title", "type", "status", "primary_category", "contributors"],
             "properties": {
                 "title":               {"type": "string",  "description": "Post headline"},
-                "english_title":       {"type": "string",  "description": "Plain English headline used for slug generation — pass the title text as-is, NOT a pre-formatted slug (e.g. 'India vs Australia Trophy' not 'india-vs-australia-trophy'). Immutable after creation."},
+                "english_title":       {"type": "string",  "description": "Plain English headline for slug generation — same as title text, NOT pre-slugified (e.g. 'India vs Australia Trophy 2025' not 'india-vs-australia-trophy-2025'). Immutable after creation."},
                 "type":                {"type": "string",  "description": "Post type: Article, Video, Web Story, Gallery, LiveBlog, CustomPage, BlankPage. Immutable after creation."},
                 "status":              {"type": "string",  "description": "Draft, Published, Scheduled, or Approval Pending"},
                 "primary_category":    {"type": "integer", "description": "Primary category ID"},
-                "contributors":        {"type": "string",  "description": "Comma-separated author IDs"},
+                "contributors":        {"type": "string",  "description": "REQUIRED — comma-separated author IDs (e.g. '12' or '12,15'). Use list_authors to find valid IDs. Omitting this field causes the API to reject the request."},
                 "content":             {"type": "string",  "description": "HTML body content"},
                 "tags":                {"type": "string",  "description": "Comma-separated tag IDs"},
                 "categories":          {"type": "string",  "description": "Comma-separated additional category IDs"},
@@ -905,9 +908,21 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
         if name == "cms_create_post":
             with fn_trace("cms_create_post", group="Tool"):
                 dry_run = args.get("dry_run", True)
-                # Strip dry_run and drop None values — sending null optional fields
-                # causes DRF to reject the request with type validation errors.
-                payload = {k: v for k, v in args.items() if k != "dry_run" and v is not None}
+                # Strip dry_run and drop None/empty values — sending null optional
+                # fields causes DRF to reject the request with type validation errors.
+                payload = {k: v for k, v in args.items() if k != "dry_run" and v is not None and v != ""}
+                # contributors is required by the Publive API. Omitting it causes a
+                # hard "Enter a valid integer." validation error from the backend.
+                if not payload.get("contributors"):
+                    return {
+                        "error_type": "missing_required_field",
+                        "message": (
+                            "contributors is required to create a post. "
+                            "Call list_authors to find valid author IDs, then include "
+                            "contributors as a comma-separated string (e.g. '12' or '12,15')."
+                        ),
+                        "retryable": False,
+                    }
                 # Coerce integer fields: AI clients sometimes send "156228" (string)
                 # instead of 156228 (int), which causes DRF "Enter a valid integer."
                 for _int_field in ("primary_category", "banner_url"):
@@ -928,7 +943,7 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 dry_run         = args.get("dry_run", True)
                 confirm_publish = args.get("confirm_publish", False)
                 post_id         = args["id"]
-                changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish") and v is not None}
+                changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish") and v is not None and v != ""}
                 # Coerce integer fields sent as strings by AI clients
                 for _int_field in ("primary_category", "banner_url"):
                     if _int_field in changes:
