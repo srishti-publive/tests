@@ -905,7 +905,17 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
         if name == "cms_create_post":
             with fn_trace("cms_create_post", group="Tool"):
                 dry_run = args.get("dry_run", True)
-                payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                # Strip dry_run and drop None values — sending null optional fields
+                # causes DRF to reject the request with type validation errors.
+                payload = {k: v for k, v in args.items() if k != "dry_run" and v is not None}
+                # Coerce integer fields: AI clients sometimes send "156228" (string)
+                # instead of 156228 (int), which causes DRF "Enter a valid integer."
+                for _int_field in ("primary_category", "banner_url"):
+                    if _int_field in payload:
+                        try:
+                            payload[_int_field] = int(payload[_int_field])
+                        except (ValueError, TypeError):
+                            pass
                 # Draft posts are reversible — create directly, no preview step
                 if payload.get("status") == "Draft":
                     return cms_post(credentials, "/post/", payload)
@@ -918,7 +928,14 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 dry_run         = args.get("dry_run", True)
                 confirm_publish = args.get("confirm_publish", False)
                 post_id         = args["id"]
-                changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish")}
+                changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish") and v is not None}
+                # Coerce integer fields sent as strings by AI clients
+                for _int_field in ("primary_category", "banner_url"):
+                    if _int_field in changes:
+                        try:
+                            changes[_int_field] = int(changes[_int_field])
+                        except (ValueError, TypeError):
+                            pass
                 # Saving as Draft is reversible — skip dry_run
                 if changes.get("status") == "Draft":
                     return cms_patch(credentials, f"/post/{post_id}/", changes)
