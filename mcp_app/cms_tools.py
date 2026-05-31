@@ -31,7 +31,13 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_categories",
-        "description": "List all CMS categories with pagination. Returns every category including those not yet published.",
+        "description": (
+            "List all CMS categories with pagination. Returns every category including unpublished ones. "
+            "NOTE: if the user only needs published categories, prefer the CDS list_categories tool — "
+            "it is simpler and returns just published data. Use this tool when the user needs drafts, "
+            "unpublished categories, or management operations. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -42,7 +48,13 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_category",
-        "description": "Retrieve a single CMS category by ID.",
+        "description": (
+            "Retrieve a single CMS category by ID. Returns full details including unpublished fields. "
+            "NOTE: if the user only needs basic published data, prefer the CDS get_category tool. "
+            "Use this when the user needs full management data or plans to update the category. "
+            "Always ask the user for the category ID before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["id"],
@@ -55,8 +67,9 @@ CMS_TOOLS = [
         "name": "cms_create_category",
         "description": (
             "Create a new category in the CMS. "
-            "dry_run=true (default): previews what will be created — no changes made. "
-            "dry_run=false: creates the category. "
+            "BEFORE calling: confirm all details with the user — at minimum name and english_name. "
+            "Workflow: dry_run=true (default) shows a full preview of what will be created — no changes made. "
+            "Once the user confirms the preview, call again with dry_run=false to create. "
             "Immutable after creation: english_name, slug, parent_category, content_type."
         ),
         "inputSchema": {
@@ -82,8 +95,9 @@ CMS_TOOLS = [
         "name": "cms_update_category",
         "description": (
             "Update an existing category. "
-            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
-            "dry_run=false: applies the update. "
+            "BEFORE calling: confirm the category ID and all fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
             "Immutable fields that cannot be changed: english_name, slug, content_type."
         ),
         "inputSchema": {
@@ -106,8 +120,9 @@ CMS_TOOLS = [
         "description": (
             "Permanently delete a category. This action CANNOT be undone. "
             "Posts assigned to this category will lose their category assignment. "
-            "dry_run=true (default): fetches and shows the category — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the category ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full category details — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm deletion, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -124,7 +139,12 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_tags",
-        "description": "List all CMS tags with pagination.",
+        "description": (
+            "List all CMS tags with pagination. Returns all tags including unpublished ones. "
+            "NOTE: if the user only needs published tags, prefer the CDS list_tags tool — simpler and sufficient. "
+            "Use this when the user needs full tag management. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -135,7 +155,12 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_tag",
-        "description": "Retrieve a single CMS tag by ID.",
+        "description": (
+            "Retrieve a single CMS tag by ID. Returns full management details. "
+            "NOTE: if the user only needs basic published data, prefer the CDS get_tag tool. "
+            "Always ask the user for the tag ID before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["id"],
@@ -148,8 +173,9 @@ CMS_TOOLS = [
         "name": "cms_create_tag",
         "description": (
             "Create a new tag in the CMS. "
-            "dry_run=true (default): previews what will be created — no changes made. "
-            "dry_run=false: creates the tag. "
+            "BEFORE calling: confirm all details with the user — at minimum name and english_name. "
+            "Workflow: dry_run=true (default) shows a full preview of what will be created — no changes made. "
+            "Once the user confirms the preview, call again with dry_run=false to create. "
             "Immutable after creation: english_name, slug."
         ),
         "inputSchema": {
@@ -170,8 +196,9 @@ CMS_TOOLS = [
         "name": "cms_update_tag",
         "description": (
             "Update an existing tag. "
-            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
-            "dry_run=false: applies the update. "
+            "BEFORE calling: confirm the tag ID and all fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
             "Immutable fields that cannot be changed: english_name, slug."
         ),
         "inputSchema": {
@@ -191,8 +218,9 @@ CMS_TOOLS = [
         "name": "cms_delete_tag",
         "description": (
             "Permanently delete a tag. This action CANNOT be undone. "
-            "dry_run=true (default): fetches and shows the tag — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the tag ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full tag details — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm deletion, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -209,7 +237,13 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_posts",
-        "description": "List all CMS posts with pagination. Includes drafts, published, and scheduled posts — unlike the CDS list_posts which only returns published content.",
+        "description": (
+            "List all CMS posts with pagination. Includes drafts, published, and scheduled posts. "
+            "NOTE: if the user only needs published posts, prefer the CDS list_posts tool — it has richer "
+            "filtering (by type, category, tag, author, date range) and is simpler. Use cms_list_posts "
+            "when the user needs drafts, scheduled posts, or management operations. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -220,7 +254,12 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_post",
-        "description": "Retrieve a single CMS post by ID. Returns full details including draft and scheduled content.",
+        "description": (
+            "Retrieve a single CMS post by ID. Returns full details including draft and scheduled content. "
+            "NOTE: if the user only needs basic published data, prefer the CDS get_post tool. "
+            "Always ask the user for the post ID before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["id"],
@@ -233,8 +272,12 @@ CMS_TOOLS = [
         "name": "cms_create_post",
         "description": (
             "Create a new post in the CMS. "
-            "dry_run=true (default): previews what will be created — no changes made. "
-            "dry_run=false: creates the post. "
+            "BEFORE calling: collect all required fields from the user — title, english_title, type, status, primary_category. "
+            "Ask for optional fields (content, tags, banner_url, etc.) based on user intent before calling. "
+            "DRAFT posts (status=Draft): created immediately — no preview step, safe because drafts are reversible. "
+            "PUBLISHED/SCHEDULED/APPROVAL PENDING posts: "
+            "dry_run=true (default) shows a full preview of what will be created — no changes made. "
+            "Show the preview to the user and ask them to confirm, then call again with dry_run=false to create. "
             "Immutable after creation: english_title, type, slug, meta_data, custom_published_at."
         ),
         "inputSchema": {
@@ -267,8 +310,12 @@ CMS_TOOLS = [
         "name": "cms_update_post",
         "description": (
             "Update an existing post. "
-            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
-            "dry_run=false: applies the update. "
+            "BEFORE calling: confirm the post ID and all fields to change with the user. "
+            "SETTING STATUS TO DRAFT: updates immediately — no dry_run step needed, saving as draft is reversible. "
+            "ALL OTHER UPDATES (content, publish, schedule, etc.): "
+            "dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
+            "PUBLISHING: also requires confirm_publish=true together with dry_run=false. "
             "Cannot be changed after creation: english_title, type, slug."
         ),
         "inputSchema": {
@@ -297,8 +344,9 @@ CMS_TOOLS = [
         "name": "cms_delete_post",
         "description": (
             "Permanently delete a post and all its associated data. This action CANNOT be undone. "
-            "dry_run=true (default): fetches and shows the post — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the post ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full post details — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm deletion, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -315,7 +363,12 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_live_blog_updates",
-        "description": "List all update entries for a LiveBlog post, ordered by creation time descending. Only applies to posts with type LiveBlog.",
+        "description": (
+            "List all update entries for a LiveBlog post, ordered by creation time descending. Only applies to posts with type LiveBlog. "
+            "NOTE: the CDS get_live_blog_updates tool also returns live blog updates for published posts — prefer it for read-only queries. "
+            "Always ask the user for the post_id before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["post_id"],
@@ -326,7 +379,11 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_live_blog_update",
-        "description": "Retrieve a single live blog update entry by its ID. Only applies to posts with type LiveBlog.",
+        "description": (
+            "Retrieve a single live blog update entry by its ID. Only applies to posts with type LiveBlog. "
+            "Always ask the user for both post_id and update id before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["post_id", "id"],
@@ -340,8 +397,9 @@ CMS_TOOLS = [
         "name": "cms_create_live_blog_update",
         "description": (
             "Add a new update entry to a LiveBlog post. Only applies to posts with type LiveBlog. "
-            "dry_run=true (default): previews what will be created — no changes made. "
-            "dry_run=false: adds the update entry."
+            "BEFORE calling: confirm the post_id, title, and content with the user. "
+            "Workflow: dry_run=true (default) shows a preview of the update — no changes made. "
+            "Once the user confirms the preview, call again with dry_run=false to add the entry."
         ),
         "inputSchema": {
             "type": "object",
@@ -358,8 +416,9 @@ CMS_TOOLS = [
         "name": "cms_update_live_blog_update",
         "description": (
             "Update an existing live blog update entry. Only applies to posts with type LiveBlog. "
-            "dry_run=true (default): fetches current entry and shows a diff — no changes made. "
-            "dry_run=false: applies the update."
+            "BEFORE calling: confirm the post_id, update id, and fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches the current entry and shows a diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply."
         ),
         "inputSchema": {
             "type": "object",
@@ -377,8 +436,9 @@ CMS_TOOLS = [
         "name": "cms_delete_live_blog_update",
         "description": (
             "Permanently delete a live blog update entry. This action CANNOT be undone. "
-            "dry_run=true (default): fetches and shows the entry — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the post_id and update id with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full entry — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -396,7 +456,7 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_custom_components",
-        "description": "List all custom components with pagination.",
+        "description": "List all custom components with pagination. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -407,7 +467,7 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_custom_component",
-        "description": "Retrieve a single custom component by ID.",
+        "description": "Retrieve a single custom component by ID. Always ask the user for the component ID before calling if not already provided. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
             "required": ["id"],
@@ -420,8 +480,9 @@ CMS_TOOLS = [
         "name": "cms_create_custom_component",
         "description": (
             "Create a new custom component in the CMS. "
-            "dry_run=true (default): previews what will be created — no changes made. "
-            "dry_run=false: creates the component."
+            "BEFORE calling: confirm the component name and content with the user. "
+            "Workflow: dry_run=true (default) shows a preview of what will be created — no changes made. "
+            "Once the user confirms the preview, call again with dry_run=false to create."
         ),
         "inputSchema": {
             "type": "object",
@@ -437,8 +498,9 @@ CMS_TOOLS = [
         "name": "cms_update_custom_component",
         "description": (
             "Update an existing custom component. "
-            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
-            "dry_run=false: applies the update."
+            "BEFORE calling: confirm the component ID and all fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply."
         ),
         "inputSchema": {
             "type": "object",
@@ -455,8 +517,9 @@ CMS_TOOLS = [
         "name": "cms_delete_custom_component",
         "description": (
             "Permanently delete a custom component. This action CANNOT be undone. "
-            "dry_run=true (default): fetches and shows the component — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the component ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full component — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -540,7 +603,7 @@ CMS_TOOLS = [
 
     {
         "name": "cms_list_media",
-        "description": "List all media assets in the CMS library with pagination.",
+        "description": "List all media assets in the CMS library with pagination. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -551,7 +614,7 @@ CMS_TOOLS = [
     },
     {
         "name": "cms_get_media",
-        "description": "Retrieve a single media asset from the CMS library by ID.",
+        "description": "Retrieve a single media asset from the CMS library by ID. Always ask the user for the media ID before calling if not already provided. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
             "required": ["id"],
@@ -565,8 +628,9 @@ CMS_TOOLS = [
         "description": (
             "Register an existing media URL into the CMS library. "
             "Important: this does NOT upload files — it registers an external URL (e.g. from S3, Cloudinary). "
-            "dry_run=true (default): previews what will be registered — no changes made. "
-            "dry_run=false: registers the media asset. "
+            "BEFORE calling: confirm the filename, path (URL), and optional metadata with the user. "
+            "Workflow: dry_run=true (default) shows a preview of what will be registered — no changes made. "
+            "Once the user confirms the preview, call again with dry_run=false to register. "
             "Immutable after creation: path, type."
         ),
         "inputSchema": {
@@ -588,8 +652,9 @@ CMS_TOOLS = [
         "name": "cms_update_media",
         "description": (
             "Update metadata of an existing media asset. "
-            "dry_run=true (default): fetches current state and shows a field-by-field diff — no changes made. "
-            "dry_run=false: applies the update. "
+            "BEFORE calling: confirm the media ID and all fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
             "Immutable fields that cannot be changed: path, type."
         ),
         "inputSchema": {
@@ -611,8 +676,9 @@ CMS_TOOLS = [
         "description": (
             "Permanently delete a media asset from the library. This action CANNOT be undone. "
             "Posts referencing this media will lose their associated image or file. "
-            "dry_run=true (default): fetches and shows the asset — no deletion. "
-            "To delete for real: set BOTH dry_run=false AND confirm_delete=true."
+            "BEFORE calling: confirm the media ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full asset details — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm, call again with dry_run=false AND confirm_delete=true."
         ),
         "inputSchema": {
             "type": "object",
@@ -840,6 +906,9 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
             with fn_trace("cms_create_post", group="Tool"):
                 dry_run = args.get("dry_run", True)
                 payload  = {k: v for k, v in args.items() if k != "dry_run"}
+                # Draft posts are reversible — create directly, no preview step
+                if payload.get("status") == "Draft":
+                    return cms_post(credentials, "/post/", payload)
                 if dry_run:
                     return {"dry_run": True, "preview": _preview_create("Post", payload)}
                 return cms_post(credentials, "/post/", payload)
@@ -850,6 +919,9 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 confirm_publish = args.get("confirm_publish", False)
                 post_id         = args["id"]
                 changes         = {k: v for k, v in args.items() if k not in ("id", "dry_run", "confirm_publish")}
+                # Saving as Draft is reversible — skip dry_run
+                if changes.get("status") == "Draft":
+                    return cms_patch(credentials, f"/post/{post_id}/", changes)
                 if dry_run:
                     current = cms_get(credentials, f"/post/{post_id}/")
                     if "error_type" in current:

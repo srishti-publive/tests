@@ -17,7 +17,11 @@ _active_tool_calls_lock = threading.Lock()
 TOOLS = [
     {
         "name": "list_posts",
-        "description": "List and filter published posts. Supports filtering by type, category, tag, author, date range, title search, and pagination.",
+        "description": (
+            "List and filter published posts. Supports filtering by type, category, tag, author, date range, title search, and pagination. "
+            "Returns only published content. If the user asks for less (e.g. just titles or a quick count), return a summary and offer to fetch more details. "
+            "If the user needs drafts or scheduled posts, suggest cms_list_posts instead."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -45,7 +49,11 @@ TOOLS = [
     },
     {
         "name": "get_post",
-        "description": "Get full details of a single post by ID or slug.",
+        "description": (
+            "Get full details of a single published post by ID or slug. "
+            "If the user only needs a few fields (e.g. just the title or author), return only those and offer more. "
+            "If the user needs draft/scheduled post details, suggest cms_get_post instead."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["identifier"],
@@ -75,7 +83,11 @@ TOOLS = [
     },
     {
         "name": "list_categories",
-        "description": "List all categories with hierarchical structure.",
+        "description": (
+            "List all published categories with hierarchical structure. "
+            "If the user only needs a quick count or names, return a summary and offer more details. "
+            "If the user needs unpublished categories or management operations, suggest cms_list_categories instead."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -86,7 +98,11 @@ TOOLS = [
     },
     {
         "name": "get_category",
-        "description": "Get a single category by ID or slug including SEO metadata and child categories.",
+        "description": (
+            "Get a single published category by ID or slug including SEO metadata and child categories. "
+            "If the user only needs basic info (name, slug), return that and offer more. "
+            "If the user needs management fields or plans to update, suggest cms_get_category instead."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["identifier"],
@@ -97,7 +113,11 @@ TOOLS = [
     },
     {
         "name": "list_tags",
-        "description": "List all tags.",
+        "description": (
+            "List all published tags. "
+            "If the user only needs a quick count or names, return a summary and offer more. "
+            "If the user needs unpublished tags or management operations, suggest cms_list_tags instead."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -108,7 +128,10 @@ TOOLS = [
     },
     {
         "name": "get_tag",
-        "description": "Get a single tag by ID or slug.",
+        "description": (
+            "Get a single published tag by ID or slug. "
+            "If the user needs management fields or plans to update, suggest cms_get_tag instead."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["identifier"],
@@ -165,7 +188,10 @@ TOOLS = [
     },
     {
         "name": "get_live_blog_updates",
-        "description": "Get live blog updates for a LiveBlog post.",
+        "description": (
+            "Get published live blog updates for a LiveBlog post. "
+            "If the user needs to add, edit, or delete update entries, use the CMS live blog update tools instead."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["post_id"],
