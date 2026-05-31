@@ -108,7 +108,7 @@ All CDS tools are read-only GET requests against `https://cds-beta.thepublive.co
 
 ### CMS Tools — Write (34 tools)
 
-All CMS tools call `https://cms.thepublive.com/publisher/{publisherId}/`. Write operations use a tiered safety model:
+All CMS tools call `https://cms-beta.thepublive.com/publisher/{publisherId}/`. Write operations use a tiered safety model:
 
 **Tier 1 — List / Get:** Direct call. No `dry_run`. Always executes immediately.
 

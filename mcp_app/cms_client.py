@@ -9,7 +9,7 @@ from .nr_utils import add_attrs, notice_err, record_metric
 
 logger = logging.getLogger(__name__)
 
-_CMS_BASE = "https://cms.thepublive.com/publisher/{publisher_id}"
+_CMS_BASE = "https://cms-beta.thepublive.com/publisher/{publisher_id}"
 _REQUEST_TIMEOUT = 10
 
 
