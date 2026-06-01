@@ -931,7 +931,11 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                             payload[_int_field] = int(payload[_int_field])
                         except (ValueError, TypeError):
                             pass
-                # Draft posts are reversible — create directly, no preview step
+            
+                for _list_field in ("tags", "categories"):
+                    if _list_field in payload and isinstance(payload[_list_field], str):
+                        payload[_list_field] = payload[_list_field].strip("[]")
+              
                 if payload.get("status") == "Draft":
                     return cms_post(credentials, "/post/", payload)
                 if dry_run:
@@ -951,7 +955,11 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                             changes[_int_field] = int(changes[_int_field])
                         except (ValueError, TypeError):
                             pass
-                # Saving as Draft is reversible — skip dry_run
+               
+                for _list_field in ("tags", "categories"):
+                    if _list_field in changes and isinstance(changes[_list_field], str):
+                        changes[_list_field] = changes[_list_field].strip("[]")
+
                 if changes.get("status") == "Draft":
                     return cms_patch(credentials, f"/post/{post_id}/", changes)
                 if dry_run:
@@ -1107,14 +1115,14 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
 
         if name == "cms_list_custom_components":
             with fn_trace("cms_list_custom_components", group="Tool"):
-                return cms_get(credentials, "/custom-component/", {
+                return cms_get(credentials, "/entities/content-type/custom-component/", {
                     "page":  args.get("page"),
                     "limit": args.get("limit"),
                 })
 
         if name == "cms_get_custom_component":
             with fn_trace("cms_get_custom_component", group="Tool"):
-                return cms_get(credentials, f"/custom-component/{args['id']}/")
+                return cms_get(credentials, f"/entities/content-type/custom-component/{args['id']}/")
 
         if name == "cms_create_custom_component":
             with fn_trace("cms_create_custom_component", group="Tool"):
@@ -1122,7 +1130,7 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 payload  = {k: v for k, v in args.items() if k != "dry_run"}
                 if dry_run:
                     return {"dry_run": True, "preview": _preview_create("Custom Component", payload)}
-                return cms_post(credentials, "/custom-component/", payload)
+                return cms_post(credentials, "/entities/content-type/custom-component/", payload)
 
         if name == "cms_update_custom_component":
             with fn_trace("cms_update_custom_component", group="Tool"):
@@ -1130,11 +1138,11 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 component_id = args["id"]
                 changes      = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
                 if dry_run:
-                    current = cms_get(credentials, f"/custom-component/{component_id}/")
+                    current = cms_get(credentials, f"/entities/content-type/custom-component/{component_id}/")
                     if "error_type" in current:
                         return current
                     return {"dry_run": True, "preview": _preview_update("Custom Component", component_id, current, changes)}
-                return cms_patch(credentials, f"/custom-component/{component_id}/", changes)
+                return cms_patch(credentials, f"/entities/content-type/custom-component/{component_id}/", changes)
 
         if name == "cms_delete_custom_component":
             with fn_trace("cms_delete_custom_component", group="Tool"):
@@ -1142,13 +1150,13 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 confirm_delete = args.get("confirm_delete", False)
                 component_id   = args["id"]
                 if dry_run:
-                    item = cms_get(credentials, f"/custom-component/{component_id}/")
+                    item = cms_get(credentials, f"/entities/content-type/custom-component/{component_id}/")
                     if "error_type" in item:
                         return item
                     return {"dry_run": True, "preview": _preview_delete("Custom Component", component_id, item)}
                 if not confirm_delete:
                     return _CONFIRM_REQUIRED
-                return cms_delete(credentials, f"/custom-component/{component_id}/")
+                return cms_delete(credentials, f"/entities/content-type/custom-component/{component_id}/")
 
         # ── Validation ────────────────────────────────────────────────────────
 
