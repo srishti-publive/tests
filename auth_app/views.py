@@ -1,17 +1,19 @@
+# Responsibility: HTTP view handlers for OAuth 2.0 PKCE flow and session-based auth.
+# Business-logic helpers (origin validation, CDS verification) live in services.py.
 import base64
 import hashlib
 import json
 import logging
 import secrets
-import time
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Optional, Union
 from urllib.parse import urlencode
 
 import newrelic.agent
 import requests
 from django.conf import settings
-from django.http import JsonResponse
-from django.shortcuts import render, redirect
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -19,76 +21,15 @@ from django.views.decorators.http import require_http_methods
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 
 from .models import OAuthClient, OAuthCode, OAuthToken
+from .services import check_origin, validate_cds_credentials, validate_redirect_uris
 
 logger = logging.getLogger(__name__)
 
 
-# ── OAuth security helpers ────────────────────────────────────────────────────
-
-def _check_origin(request):
-    """Return None if the Origin is acceptable, or a 403 JsonResponse.
-
-    Desktop MCP clients (Claude Desktop, Cursor) do not send an Origin header
-    because they are not browsers. We allow those through unconditionally.
-    When an Origin IS present (web-based Claude clients), it must be in the
-    configured allowlist from settings.OAUTH_ALLOWED_ORIGINS.
-    """
-    origin = request.META.get("HTTP_ORIGIN", "").rstrip("/")
-    if not origin:
-        return None
-    allowed = set(getattr(settings, "OAUTH_ALLOWED_ORIGINS", [
-        "https://claude.ai",
-        "https://api.claude.ai",
-    ]))
-    allowed.add(settings.BASE_URL.rstrip("/"))   # always allow same-origin
-    if origin in allowed:
-        return None
-    logger.warning("OAuth: blocked request from disallowed origin=%r", origin)
-    return JsonResponse(
-        {"error": "invalid_origin", "error_description": "Origin not allowed"},
-        status=403,
-    )
-
-
-def _validate_redirect_uris(uris):
-    """Return True only when every redirect URI matches the configured prefix allowlist."""
-    prefixes = getattr(settings, "OAUTH_ALLOWED_REDIRECT_PREFIXES", [
-        "https://claude.ai/",
-        "http://localhost:",
-        "http://127.0.0.1:",
-    ])
-    for uri in uris:
-        if not any(uri.startswith(p) for p in prefixes):
-            return False
-    return True
-
-
-# CRITICAL FIX: _validate_cds now has a function trace and records latency + status
-# so auth-path CDS calls are fully visible in APM traces.
-@newrelic.agent.function_trace(name="validate_cds_auth", group="Auth")
-def _validate_cds(publisher_id, api_key, api_secret):
-    token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
-    t0 = time.perf_counter()
-    resp = requests.get(
-        f"https://cds-beta.thepublive.com/publisher/{publisher_id}/publisher-data/",
-        headers={"Authorization": f"Basic {token}"},
-        timeout=10,
-    )
-    latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-    add_attrs([
-        ("auth.cds_validation_status", resp.status_code),
-        ("auth.cds_validation_ms", latency_ms),
-    ])
-    logger.info(
-        "CDS validation: publisher=%s status=%d latency_ms=%.2f",
-        publisher_id, resp.status_code, latency_ms,
-    )
-    return resp.status_code not in (401, 403), resp.status_code
-
-
 # ── OAuth discovery ───────────────────────────────────────────────────────────
 
-def oauth_protected_resource(request, resource_path=""):
+def oauth_protected_resource(request: HttpRequest, resource_path: str = "") -> JsonResponse:
+    """Serve the OAuth 2.0 protected-resource metadata document (RFC 9728)."""
     base_url = settings.BASE_URL.rstrip("/")
     return JsonResponse({
         "resource": f"{base_url}/mcp",
@@ -96,7 +37,8 @@ def oauth_protected_resource(request, resource_path=""):
     })
 
 
-def oauth_server_metadata(request):
+def oauth_server_metadata(request: HttpRequest) -> JsonResponse:
+    """Serve the OAuth 2.0 / OpenID Connect authorization server metadata document."""
     base_url = settings.BASE_URL.rstrip("/")
     return JsonResponse({
         "issuer": base_url,
@@ -113,15 +55,14 @@ def oauth_server_metadata(request):
 
 # ── Dynamic client registration ───────────────────────────────────────────────
 
-# HIGH FIX: oauth_register now has a function trace, transaction name, attrs and
-# error handling so client self-registration is visible in APM.
 @csrf_exempt
 @require_http_methods(["POST"])
 @newrelic.agent.function_trace(name="oauth_register", group="Auth")
-def oauth_register(request):
+def oauth_register(request: HttpRequest) -> JsonResponse:
+    """Register a new OAuth 2.0 client dynamically; validate and clean up expired clients."""
     set_txn_name("Auth/oauth_register", group="Auth")
 
-    origin_err = _check_origin(request)
+    origin_err: Optional[JsonResponse] = check_origin(request)
     if origin_err:
         return origin_err
 
@@ -130,12 +71,11 @@ def oauth_register(request):
     except Exception:
         body = {}
 
-    redirect_uris = body.get("redirect_uris", [])
+    redirect_uris: list = body.get("redirect_uris", [])
     if not isinstance(redirect_uris, list):
         redirect_uris = []
 
-    # Reject registrations that include disallowed redirect URIs.
-    if redirect_uris and not _validate_redirect_uris(redirect_uris):
+    if redirect_uris and not validate_redirect_uris(redirect_uris):
         add_attrs([("auth.flow", "oauth_register"), ("auth.result", "failure")])
         logger.warning("OAuth register: disallowed redirect_uris=%s", redirect_uris)
         return JsonResponse(
@@ -143,7 +83,7 @@ def oauth_register(request):
             status=400,
         )
 
-    client_id = secrets.token_urlsafe(24)
+    client_id: str = secrets.token_urlsafe(24)
     client_lifetime = timedelta(days=90)
 
     try:
@@ -172,10 +112,7 @@ def oauth_register(request):
             "redirect_uris": redirect_uris,
         }, status=201)
     except Exception as exc:
-        add_attrs([
-            ("auth.flow", "oauth_register"),
-            ("auth.result", "failure"),
-        ])
+        add_attrs([("auth.flow", "oauth_register"), ("auth.result", "failure")])
         notice_err(exc, [("error.layer", "auth")])
         logger.error("OAuth client registration failed", exc_info=True)
         raise
@@ -185,7 +122,8 @@ def oauth_register(request):
 
 @require_http_methods(["GET", "POST"])
 @newrelic.agent.function_trace(name="oauth_authorize", group="Auth")
-def oauth_authorize(request):
+def oauth_authorize(request: HttpRequest) -> HttpResponse:
+    """Show the authorization form (GET) or process credential submission and issue an auth code (POST)."""
     if request.method == "GET":
         return render(request, "authorize.html", {
             "client_id": request.GET.get("client_id", ""),
@@ -196,21 +134,21 @@ def oauth_authorize(request):
         })
 
     set_txn_name("Auth/pkce_authorize", group="Auth")
-    client_id = request.POST.get("client_id") or request.GET.get("client_id")
+    client_id: Optional[str] = request.POST.get("client_id") or request.GET.get("client_id")
     add_attrs([
         ("auth.flow", "oauth_pkce"),
         ("auth.client_id", client_id),
     ])
 
-    publisher_id          = request.POST.get("publisherId", "").strip()
-    api_key               = request.POST.get("apiKey", "").strip()
-    api_secret            = request.POST.get("apiSecret", "").strip()
-    redirect_uri          = request.POST.get("redirect_uri", "")
-    state                 = request.POST.get("state", "")
-    code_challenge        = request.POST.get("code_challenge", "")
-    code_challenge_method = request.POST.get("code_challenge_method", "S256")
+    publisher_id: str          = request.POST.get("publisherId", "").strip()
+    api_key: str               = request.POST.get("apiKey", "").strip()
+    api_secret: str            = request.POST.get("apiSecret", "").strip()
+    redirect_uri: str          = request.POST.get("redirect_uri", "")
+    state: str                 = request.POST.get("state", "")
+    code_challenge: str        = request.POST.get("code_challenge", "")
+    code_challenge_method: str = request.POST.get("code_challenge_method", "S256")
 
-    ctx = {
+    ctx: dict = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "state": state,
@@ -234,22 +172,16 @@ def oauth_authorize(request):
             return render(request, "authorize.html", ctx)
 
         if not all([publisher_id, api_key, api_secret]):
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "missing_params"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth authorize: missing params client=%s", client_id)
             ctx["error"] = "All fields are required."
             return render(request, "authorize.html", ctx)
 
         try:
-            ok, status_code = _validate_cds(publisher_id, api_key, api_secret)
+            ok, status_code = validate_cds_credentials(publisher_id, api_key, api_secret)
         except requests.RequestException as exc:
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "cds_auth_failed"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_auth_failed")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.error(
                 "OAuth authorize: CDS unreachable publisher=%s client=%s",
@@ -259,10 +191,7 @@ def oauth_authorize(request):
             return render(request, "authorize.html", ctx)
 
         if not ok:
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "cds_auth_failed"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_auth_failed")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning(
                 "OAuth authorize: invalid CDS credentials publisher=%s client=%s status=%d",
@@ -271,7 +200,7 @@ def oauth_authorize(request):
             ctx["error"] = f"Invalid credentials (HTTP {status_code}). Check your Publisher ID, API Key, and API Secret."
             return render(request, "authorize.html", ctx)
 
-        code = secrets.token_urlsafe(32)
+        code: str = secrets.token_urlsafe(32)
         OAuthCode.objects.create(
             code=code,
             client_id=client_id,
@@ -286,9 +215,7 @@ def oauth_authorize(request):
             ("auth.publisher_id", publisher_id),
             ("auth.client_id", client_id),
         ])
-        logger.info(
-            "OAuth authorize: success publisher=%s client=%s", publisher_id, client_id
-        )
+        logger.info("OAuth authorize: success publisher=%s client=%s", publisher_id, client_id)
         return redirect(f"{redirect_uri}?{urlencode({'code': code, 'state': state})}")
     except Exception as exc:
         notice_err(exc, [("error.layer", "auth")])
@@ -301,27 +228,25 @@ def oauth_authorize(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @newrelic.agent.function_trace(name="oauth_token", group="Auth")
-def oauth_token(request):
+def oauth_token(request: HttpRequest) -> JsonResponse:
+    """Issue or refresh a bearer token; supports authorization_code and refresh_token grants."""
     set_txn_name("Auth/pkce_token", group="Auth")
 
     if "application/json" in (request.content_type or ""):
         try:
             data = json.loads(request.body)
         except json.JSONDecodeError:
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "missing_params"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             logger.warning("OAuth token: invalid JSON body")
             return JsonResponse({"error": "invalid_request"}, status=400)
     else:
         data = request.POST
 
-    origin_err = _check_origin(request)
+    origin_err: Optional[JsonResponse] = check_origin(request)
     if origin_err:
         return origin_err
 
-    grant_type = data.get("grant_type", "")
+    grant_type: str = data.get("grant_type", "")
     add_attrs([
         ("auth.flow", "oauth_pkce"),
         ("auth.client_id", data.get("client_id")),
@@ -331,7 +256,7 @@ def oauth_token(request):
     try:
         # ── Refresh token grant ───────────────────────────────────────────────
         if grant_type == "refresh_token":
-            refresh_val = data.get("refresh_token", "")
+            refresh_val: str = data.get("refresh_token", "")
             try:
                 existing = OAuthToken.objects.get(refresh_token=refresh_val)
             except OAuthToken.DoesNotExist:
@@ -348,12 +273,12 @@ def oauth_token(request):
                 return JsonResponse({"error": "invalid_grant", "error_description": "Refresh token expired"}, status=400)
 
             # Rotate refresh_token (security); keep the same access_token value (stable identity).
-            new_refresh = secrets.token_urlsafe(32)
+            new_refresh: str = secrets.token_urlsafe(32)
             existing.refresh_token = new_refresh
             existing.expires_at = timezone.now() + timedelta(days=30)
             existing.save(update_fields=["refresh_token", "expires_at"])
 
-            publisher_id = existing.credentials.get("publisherId", "")
+            publisher_id: str = existing.credentials.get("publisherId", "")
             add_attrs([
                 ("auth.result", "success"),
                 ("auth.token_reused", True),
@@ -361,10 +286,7 @@ def oauth_token(request):
                 ("auth.client_id", existing.client_id),
             ])
             record_metric("Custom/Auth/token_refresh_count", 1)
-            logger.info(
-                "OAuth token refreshed: publisher=%s client=%s",
-                publisher_id, existing.client_id,
-            )
+            logger.info("OAuth token refreshed: publisher=%s client=%s", publisher_id, existing.client_id)
             return JsonResponse({
                 "access_token": existing.token,
                 "token_type": "bearer",
@@ -376,14 +298,11 @@ def oauth_token(request):
         if grant_type != "authorization_code":
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             record_metric("Custom/Auth/auth_failure_count", 1)
-            logger.warning(
-                "OAuth token: unsupported grant_type=%s client=%s",
-                grant_type, data.get("client_id"),
-            )
+            logger.warning("OAuth token: unsupported grant_type=%s client=%s", grant_type, data.get("client_id"))
             return JsonResponse({"error": "unsupported_grant_type"}, status=400)
 
-        code          = data.get("code", "")
-        code_verifier = data.get("code_verifier", "")
+        code: str          = data.get("code", "")
+        code_verifier: str = data.get("code_verifier", "")
 
         try:
             auth_code = OAuthCode.objects.get(code=code)
@@ -400,7 +319,7 @@ def oauth_token(request):
             logger.warning("OAuth token: expired code client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
 
-        expected = base64.urlsafe_b64encode(
+        expected: str = base64.urlsafe_b64encode(
             hashlib.sha256(code_verifier.encode()).digest()
         ).rstrip(b"=").decode()
         if expected != auth_code.code_challenge:
@@ -409,9 +328,9 @@ def oauth_token(request):
             logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
 
-        credentials     = auth_code.credentials
-        oauth_client_id = data.get("client_id") or auth_code.client_id
-        publisher_id    = credentials.get("publisherId", "")
+        credentials: dict    = auth_code.credentials
+        oauth_client_id: str = data.get("client_id") or auth_code.client_id
+        publisher_id         = credentials.get("publisherId", "")
         auth_code.delete()
 
         # Upsert: return the existing valid token for this client+publisher so
@@ -422,8 +341,8 @@ def oauth_token(request):
         ).filter(credentials__publisherId=publisher_id).first()
 
         if existing:
-            remaining = int((existing.expires_at - timezone.now()).total_seconds())
-            # Ensure old tokens (pre-refresh_token migration) get a refresh_token on re-auth.
+            remaining: int = int((existing.expires_at - timezone.now()).total_seconds())
+            # Backfill refresh_token for tokens created before the refresh_token migration.
             if not existing.refresh_token:
                 existing.refresh_token = secrets.token_urlsafe(32)
                 existing.save(update_fields=["refresh_token"])
@@ -444,8 +363,8 @@ def oauth_token(request):
                 "refresh_token": existing.refresh_token,
             })
 
-        token       = secrets.token_urlsafe(32)
-        new_refresh = secrets.token_urlsafe(32)
+        token: str       = secrets.token_urlsafe(32)
+        new_refresh: str = secrets.token_urlsafe(32)
         OAuthToken.objects.create(
             token=token,
             client_id=oauth_client_id,
@@ -461,10 +380,7 @@ def oauth_token(request):
             ("auth.client_id", oauth_client_id),
         ])
         record_metric("Custom/Auth/token_issued_count", 1)
-        logger.info(
-            "OAuth token issued (new): publisher=%s client=%s",
-            publisher_id, oauth_client_id,
-        )
+        logger.info("OAuth token issued (new): publisher=%s client=%s", publisher_id, oauth_client_id)
         return JsonResponse({
             "access_token": token,
             "token_type": "bearer",
@@ -477,13 +393,15 @@ def oauth_token(request):
         raise
 
 
-# ── Legacy session-based auth (kept for direct browser use) ──────────────────
+# ── Session-based auth (browser users) ───────────────────────────────────────
 
-def connect(request):
+def connect(request: HttpRequest) -> HttpResponse:
+    """Render the browser-based session login page."""
     return render(request, "connect.html")
 
 
-def auth_success(request):
+def auth_success(request: HttpRequest) -> HttpResponse:
+    """Render the post-login success page; redirect to /connect if session is missing."""
     if not request.session.get("credentials"):
         return redirect("/connect")
     return render(request, "success.html")
@@ -492,7 +410,8 @@ def auth_success(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @newrelic.agent.function_trace(name="auth_login", group="Auth")
-def auth_login(request):
+def auth_login(request: HttpRequest) -> JsonResponse:
+    """Validate Publive credentials via CDS, create a session, and set the user-chosen TTL."""
     set_txn_name("Auth/session_login", group="Auth")
     add_attrs([("auth.flow", "session")])
 
@@ -500,46 +419,32 @@ def auth_login(request):
         try:
             body = json.loads(request.body)
         except json.JSONDecodeError:
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "missing_params"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             logger.warning("auth_login: invalid JSON body")
             return JsonResponse({"error": "Invalid request body."}, status=400)
 
-        publisher_id = str(body.get("publisherId", "")).strip()
-        api_key      = str(body.get("apiKey", "")).strip()
-        api_secret   = str(body.get("apiSecret", "")).strip()
+        publisher_id: str = str(body.get("publisherId", "")).strip()
+        api_key: str      = str(body.get("apiKey", "")).strip()
+        api_secret: str   = str(body.get("apiSecret", "")).strip()
 
         if not all([publisher_id, api_key, api_secret]):
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "missing_params"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("auth_login: missing params publisher=%s", publisher_id)
             return JsonResponse({"error": "All fields are required."}, status=400)
 
         try:
-            ok, status_code = _validate_cds(publisher_id, api_key, api_secret)
+            ok, status_code = validate_cds_credentials(publisher_id, api_key, api_secret)
         except requests.RequestException as exc:
-            add_attrs([
-                ("auth.result", "failure"),
-                ("auth.failure_reason", "cds_auth_failed"),
-            ])
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_auth_failed")])
             record_metric("Custom/Auth/auth_failure_count", 1)
-            logger.error(
-                "auth_login: CDS unreachable publisher=%s", publisher_id, exc_info=True
-            )
+            logger.error("auth_login: CDS unreachable publisher=%s", publisher_id, exc_info=True)
             return JsonResponse({"error": f"Could not reach Publive API: {exc}"}, status=500)
 
         if ok:
-            from datetime import datetime
-
-            # User-chosen session duration. 0 = expire when browser closes.
-            _VALID_DURATIONS = {0, 1, 7, 30, 90}
+            _VALID_DURATIONS: set[int] = {0, 1, 7, 30, 90}
             try:
-                remember_for_days = int(body.get("remember_for_days", 30))
+                remember_for_days: int = int(body.get("remember_for_days", 30))
             except (TypeError, ValueError):
                 remember_for_days = 30
             if remember_for_days not in _VALID_DURATIONS:
@@ -570,17 +475,11 @@ def auth_login(request):
             )
             return JsonResponse({"success": True, "redirectTo": "/auth/success"})
 
-        add_attrs([
-            ("auth.result", "failure"),
-            ("auth.failure_reason", "cds_auth_failed"),
-        ])
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_auth_failed")])
         record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning(
-            "auth_login: invalid credentials publisher=%s status=%d", publisher_id, status_code
-        )
+        logger.warning("auth_login: invalid credentials publisher=%s status=%d", publisher_id, status_code)
         if status_code in (401, 403):
             return JsonResponse({"error": "Invalid credentials."}, status=401)
-
         return JsonResponse({"error": f"HTTP {status_code}"}, status=500)
     except Exception as exc:
         notice_err(exc, [("error.layer", "auth")])
@@ -588,11 +487,9 @@ def auth_login(request):
         raise
 
 
-# HIGH FIX: suppress_apdex_metric() + suppress_transaction_trace() so the Railway
-# health check (hits /auth/status every few seconds) doesn't pollute Apdex scores
-# or flood the slow transaction trace list.
 @newrelic.agent.function_trace(name="auth_status", group="Auth")
-def auth_status(request):
+def auth_status(request: HttpRequest) -> JsonResponse:
+    """Return the current session state including publisher ID, login time, and TTL."""
     set_txn_name("Auth/session_verify", group="Auth")
     newrelic.agent.suppress_apdex_metric()
     newrelic.agent.suppress_transaction_trace()
@@ -605,7 +502,7 @@ def auth_status(request):
                 ("auth.result", "success"),
                 ("auth.publisher_id", credentials.get("publisherId")),
             ])
-            expiry_age = request.session.get_expiry_age()   # seconds remaining
+            expiry_age: int = request.session.get_expiry_age()
             return JsonResponse({
                 "authenticated": True,
                 "publisherId": credentials.get("publisherId"),
@@ -614,10 +511,7 @@ def auth_status(request):
                 "session_expires_in_seconds": expiry_age,
             })
 
-        add_attrs([
-            ("auth.result", "failure"),
-            ("auth.failure_reason", "invalid_session"),
-        ])
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_session")])
         return JsonResponse({"authenticated": False})
     except Exception as exc:
         notice_err(exc, [("error.layer", "auth")])
@@ -628,9 +522,10 @@ def auth_status(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @newrelic.agent.function_trace(name="auth_logout", group="Auth")
-def auth_logout(request):
+def auth_logout(request: HttpRequest) -> JsonResponse:
+    """Flush the current session and log the publisher out."""
     set_txn_name("Auth/session_logout", group="Auth")
-    publisher_id = (request.session.get("credentials") or {}).get("publisherId", "unknown")
+    publisher_id: str = (request.session.get("credentials") or {}).get("publisherId", "unknown")
     request.session.flush()
     add_attrs([
         ("auth.flow", "session"),
