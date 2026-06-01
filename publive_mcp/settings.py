@@ -61,46 +61,49 @@ DATABASES = {
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
 
-if REDIS_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": REDIS_URL,
-            "OPTIONS": {
-                "CLIENT_CLASS": "django_redis.client.DefaultClient",
-                # Fail fast rather than hang — gunicorn timeout is 60 s
-                "SOCKET_CONNECT_TIMEOUT": 5,
-                "SOCKET_TIMEOUT": 5,
-                "RETRY_ON_TIMEOUT": True,
-                "CONNECTION_POOL_KWARGS": {"max_connections": 20},
-            },
-            "KEY_PREFIX": "publive_mcp",
-            # Match session lifetime so cache entries don't expire before cookies
-            "TIMEOUT": int(os.environ.get("SESSION_COOKIE_AGE", str(7 * 24 * 3600))),
-        }
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
-    # cached_db: Redis is primary (fast read/write), Postgres is fallback.
-    # Sessions survive Redis restarts — they're also written to the DB table.
-    SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
-    SESSION_CACHE_ALIAS = "default"
-else:
-    # No Redis configured (local dev without Redis) — fall back to DB sessions.
-    # The app will still work; just won't survive redeploys until Redis is wired up.
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        }
-    }
-    SESSION_ENGINE = "django.contrib.sessions.backends.db"
+}
+
+# Sessions are stored in the database (PostgreSQL in production, SQLite in dev).
+# With DATABASE_URL pointing to Railway Postgres, sessions and OAuthTokens
+# survive every redeploy because the data lives on the persistent postgres-volume,
+# not inside the container.
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 # Override via Railway env var if you want shorter/longer sessions.
 # Default: 7 days (604800 s). Previous value was 1 day (86400 s).
-SESSION_COOKIE_AGE = int(os.environ.get("SESSION_COOKIE_AGE", str(7 * 24 * 3600)))
+# Maximum possible session age — individual sessions override this via
+# session.set_expiry() based on the user's "stay logged in for" choice.
+SESSION_COOKIE_AGE = 90 * 24 * 3600   # 90 days ceiling
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = "Lax"
+# Refresh session TTL on every request so an active session never expires
+# while the user is still using it.
+SESSION_SAVE_EVERY_REQUEST = True
+
+# ── OAuth security ────────────────────────────────────────────────────────────
+
+# Origins allowed to call /oauth/token, /oauth/authorize (POST), and /register.
+# Desktop MCP clients (Claude Desktop) do not send an Origin header — those are
+# always allowed through. This list only governs browser-origin requests.
+OAUTH_ALLOWED_ORIGINS = [
+    "https://claude.ai",
+    "https://api.claude.ai",
+]
+
+# Redirect URIs allowed during dynamic client registration.
+# Every URI submitted to /register must start with one of these prefixes.
+OAUTH_ALLOWED_REDIRECT_PREFIXES = [
+    "https://claude.ai/",
+    "http://localhost:",
+    "http://127.0.0.1:",
+]
 
 # ── Static files ──────────────────────────────────────────────────────────────
 

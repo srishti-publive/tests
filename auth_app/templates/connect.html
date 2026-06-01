@@ -236,7 +236,7 @@
       margin-bottom: 5px;
     }
 
-    input {
+    input, select {
       width: 100%;
       background: #fff;
       border: 1px solid #d1d5db;
@@ -251,10 +251,12 @@
 
     input::placeholder { color: var(--text-placeholder); }
 
-    input:focus {
+    input:focus, select:focus {
       border-color: var(--border-focus);
       box-shadow: 0 0 0 3px rgba(28, 100, 242, 0.12);
     }
+
+    select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; cursor: pointer; }
 
     .password-wrap { position: relative; }
     .password-wrap input { padding-right: 42px; }
@@ -427,6 +429,17 @@
         </div>
       </div>
 
+      <div class="field">
+        <label for="rememberFor">Stay logged in for</label>
+        <select id="rememberFor">
+          <option value="7">7 days</option>
+          <option value="30" selected>30 days</option>
+          <option value="90">90 days</option>
+          <option value="1">1 day</option>
+          <option value="0">Until I close the browser</option>
+        </select>
+      </div>
+
       <button class="btn" id="connectBtn" onclick="handleConnect()">
         <div class="btn-inner">
           <div class="spinner" id="spinner"></div>
@@ -437,7 +450,7 @@
       <hr class="divider" />
 
       <p class="footer-note">
-        Credentials are stored in your session only and never saved to disk.<br />
+        <span id="sessionNote">Session lasts 30 days and refreshes on each use.</span><br />
         <a href="https://thepublive.com/contact-us" target="_blank">Need help? Contact Publive →</a>
       </p>
 
@@ -456,14 +469,24 @@
       });
     });
 
+    // Update footer note to reflect the chosen duration
+    document.getElementById('rememberFor').addEventListener('change', function () {
+      const note = document.getElementById('sessionNote');
+      const val  = parseInt(this.value, 10);
+      note.textContent = val === 0
+        ? 'Session ends when you close the browser.'
+        : `Session lasts ${val} day${val === 1 ? '' : 's'} and refreshes on each use.`;
+    });
+
     async function handleConnect() {
-      const publisherId = document.getElementById('publisherId').value.trim();
-      const apiKey      = document.getElementById('apiKey').value.trim();
-      const apiSecret   = document.getElementById('apiSecret').value.trim();
-      const errorBox    = document.getElementById('errorBox');
-      const btn         = document.getElementById('connectBtn');
-      const spinner     = document.getElementById('spinner');
-      const btnText     = document.getElementById('btnText');
+      const publisherId      = document.getElementById('publisherId').value.trim();
+      const apiKey           = document.getElementById('apiKey').value.trim();
+      const apiSecret        = document.getElementById('apiSecret').value.trim();
+      const rememberForDays  = parseInt(document.getElementById('rememberFor').value, 10);
+      const errorBox         = document.getElementById('errorBox');
+      const btn              = document.getElementById('connectBtn');
+      const spinner          = document.getElementById('spinner');
+      const btnText          = document.getElementById('btnText');
 
       errorBox.style.display = 'none';
 
@@ -480,7 +503,7 @@
         const res  = await fetch('/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ publisherId, apiKey, apiSecret }),
+          body: JSON.stringify({ publisherId, apiKey, apiSecret, remember_for_days: rememberForDays }),
           credentials: 'include',
         });
         const data = await res.json();

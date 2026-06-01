@@ -277,6 +277,11 @@ CMS_TOOLS = [
             "contributors is REQUIRED by the API — omitting it causes a hard validation failure. "
             "If the user has not provided an author ID, call list_authors first to get one, then ask the user to confirm. "
             "english_title must be plain English text matching the title, NOT a pre-slugified string. "
+            "TYPE-SPECIFIC REQUIREMENTS — do NOT attempt to create these without the noted fields: "
+            "Video: requires meta_data with meta_video_url and meta_video_embed. "
+            "Web Story: requires AMP story slide markup in the content field — create via dashboard first if you don't have it. "
+            "Gallery: requires gallery image data in content or custom_entity — create via dashboard first if you don't have it. "
+            "Article, LiveBlog, CustomPage, BlankPage: no extra required fields beyond the six standard ones. "
             "DRAFT posts (status=Draft): created immediately — no preview step, safe because drafts are reversible. "
             "PUBLISHED/SCHEDULED/APPROVAL PENDING posts: "
             "dry_run=true (default) shows a full preview — no changes made. "
@@ -475,44 +480,67 @@ CMS_TOOLS = [
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id": {"type": "integer", "description": "Custom component ID"},
+                "id": {"type": "string", "description": "Custom component ID (MongoDB ObjectID, e.g. '6a153d41653f8ae9df571c7e')"},
             },
         },
     },
     {
         "name": "cms_create_custom_component",
         "description": (
-            "Create a new custom component in the CMS. "
-            "BEFORE calling: confirm the component name and content with the user. "
-            "Workflow: dry_run=true (default) shows a preview of what will be created — no changes made. "
-            "Once the user confirms the preview, call again with dry_run=false to create."
+            "Create a new custom component schema in the CMS. "
+            "Custom components are reusable typed-field schemas (like a form builder), NOT HTML templates. "
+            "Each component defines a set of named fields with types such as short_text, long_text, integer, boolean, media. "
+            "BEFORE calling: confirm the component name and its field definitions with the user. "
+            "Workflow: dry_run=true (default) shows a preview — no changes made. "
+            "Once the user confirms, call again with dry_run=false to create."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["name"],
             "properties": {
-                "name":    {"type": "string",  "description": "Component name"},
-                "content": {"type": "string",  "description": "Component HTML/template content"},
-                "dry_run": {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
+                "name":        {"type": "string",  "description": "Display name for the component (e.g. 'Main Section')"},
+                "meta_data":   {"type": "object",  "description": "Additional metadata. Supports: {\"description\": \"Human-readable description\"}"},
+                "field_types": {
+                    "type": "array",
+                    "description": (
+                        "Array of field definitions. Each object: "
+                        "{name (string, required), type (string, required — short_text|long_text|integer|boolean|media|url), "
+                        "meta_data (object — label, tooltip, type, placeholder, default each as {\"value\": ...}), "
+                        "validations (object — required, max_length each as {\"value\": ...}), group_id (string)}"
+                    ),
+                },
+                "settings":    {"type": "object",  "description": "Component-level settings object"},
+                "dry_run":     {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
             },
         },
     },
     {
         "name": "cms_update_custom_component",
         "description": (
-            "Update an existing custom component. "
-            "BEFORE calling: confirm the component ID and all fields to change with the user. "
-            "Workflow: dry_run=true (default) fetches current state and shows a field-by-field diff — no changes made. "
-            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply."
+            "Update an existing custom component schema. "
+            "Custom components are typed-field schema definitions — NOT HTML templates. "
+            "BEFORE calling: confirm the component ID and fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
+            "NOTE: sending field_types replaces the entire field definition array."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id":      {"type": "integer", "description": "Custom component ID"},
-                "name":    {"type": "string",  "description": "New component name"},
-                "content": {"type": "string",  "description": "New component HTML/template content"},
-                "dry_run": {"type": "boolean", "description": "true = show diff only, no changes (default); false = apply update"},
+                "id":          {"type": "string",  "description": "Custom component ID (MongoDB ObjectID, e.g. '6a153d41653f8ae9df571c7e')"},
+                "name":        {"type": "string",  "description": "New display name for the component"},
+                "meta_data":   {"type": "object",  "description": "Updated metadata. Supports: {\"description\": \"...\"}"},
+                "field_types": {
+                    "type": "array",
+                    "description": (
+                        "Replacement field definitions (replaces the whole array). Each object: "
+                        "{name (string, required), type (string, required — short_text|long_text|integer|boolean|media|url), "
+                        "meta_data (object), validations (object), group_id (string)}"
+                    ),
+                },
+                "settings":    {"type": "object",  "description": "Updated component-level settings"},
+                "dry_run":     {"type": "boolean", "description": "true = show diff only, no changes (default); false = apply update"},
             },
         },
     },
@@ -528,7 +556,127 @@ CMS_TOOLS = [
             "type": "object",
             "required": ["id"],
             "properties": {
-                "id":             {"type": "integer", "description": "Custom component ID"},
+                "id":             {"type": "string", "description": "Custom component ID (MongoDB ObjectID, e.g. '6a153d41653f8ae9df571c7e')"},
+                "dry_run":        {"type": "boolean", "description": "true = preview only (default); false = delete (also requires confirm_delete=true)"},
+                "confirm_delete": {"type": "boolean", "description": "Must be explicitly set to true — together with dry_run=false — to execute the deletion"},
+            },
+        },
+    },
+
+    # ── Custom Content Types ──────────────────────────────────────────────────
+
+    {
+        "name": "cms_list_custom_content_types",
+        "description": (
+            "List all custom content type schemas defined for this publisher. "
+            "Custom content types are user-defined structured schemas (e.g. Movies, Events) beyond built-in post types. "
+            "Returns results directly — no confirmation step needed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page":  {"type": "integer", "description": "Page number (default: 1, max: 1000)"},
+                "limit": {"type": "integer", "description": "Items per page (default: 10, max: 50)"},
+            },
+        },
+    },
+    {
+        "name": "cms_get_custom_content_type",
+        "description": (
+            "Retrieve a single custom content type schema by ID. "
+            "Always ask the user for the content type ID before calling if not already provided. "
+            "Returns results directly — no confirmation step needed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Custom content type schema ID (MongoDB ObjectID)"},
+            },
+        },
+    },
+    {
+        "name": "cms_create_custom_content_type",
+        "description": (
+            "Create a new custom content type schema. "
+            "Custom content types define structured schemas (e.g. Movies, Events) with typed fields, "
+            "allowed states, API slugs, and optional settings. "
+            "BEFORE calling: confirm name, api_slug, api_collections_slug, and field definitions with the user. "
+            "Immutable after creation: api_slug, api_collections_slug. "
+            "Workflow: dry_run=true (default) shows a preview — no changes made. "
+            "Once the user confirms, call again with dry_run=false to create."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name", "api_slug", "api_collections_slug"],
+            "properties": {
+                "name":                   {"type": "string",  "description": "Display name (e.g. 'Movies')"},
+                "type":                   {"type": "string",  "description": "Schema type: Collection (default) — multiple entries"},
+                "api_slug":               {"type": "string",  "description": "Singular API slug for single-entry endpoints (e.g. 'movie'). Immutable after creation."},
+                "api_collections_slug":   {"type": "string",  "description": "Plural API slug for collection endpoints (e.g. 'movies'). Immutable after creation."},
+                "response_type":          {"type": "string",  "description": "Response format — json (default)"},
+                "field_types": {
+                    "type": "array",
+                    "description": (
+                        "Array of field definitions. Each object: "
+                        "{name (string, required), type (string, required — short_text|long_text|url|integer|boolean|media), "
+                        "meta_data (object — label, tooltip, type, placeholder, default each as {\"value\": ...}), "
+                        "validations (object — required, group_editable), group_id (string)}"
+                    ),
+                },
+                "groups":      {"type": "array",   "description": "Field group definitions for organizing fields in the editor"},
+                "components":  {"type": "array",   "description": "Associated custom component schema IDs"},
+                "settings": {
+                    "type": "object",
+                    "description": (
+                        "Type-level settings. Keys: entry_title (string), searchable_fields (array), "
+                        "filter_fields (array), allowed_states (array — Published|Draft|Scheduled|Approval Pending), "
+                        "enable_seo_properties (boolean), enable_custom_date (boolean), "
+                        "enable_component_preview (boolean), enable_content_rule (boolean), enable_code_ingestion (boolean)"
+                    ),
+                },
+                "global_system_default": {"type": "boolean", "description": "Mark as system-level default type (default: false)"},
+                "dry_run":               {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
+            },
+        },
+    },
+    {
+        "name": "cms_update_custom_content_type",
+        "description": (
+            "Update an existing custom content type schema. "
+            "BEFORE calling: confirm the schema ID and all fields to change with the user. "
+            "Workflow: dry_run=true (default) fetches current state and shows a diff — no changes made. "
+            "Show the diff to the user. Once they confirm, call again with dry_run=false to apply. "
+            "Immutable fields that cannot be changed: api_slug, api_collections_slug."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id":          {"type": "string",  "description": "Custom content type schema ID (MongoDB ObjectID)"},
+                "name":        {"type": "string",  "description": "New display name"},
+                "field_types": {"type": "array",   "description": "Replacement field definitions (replaces the whole array)"},
+                "groups":      {"type": "array",   "description": "Updated field group definitions"},
+                "components":  {"type": "array",   "description": "Updated associated component schema IDs"},
+                "settings":    {"type": "object",  "description": "Updated type-level settings"},
+                "dry_run":     {"type": "boolean", "description": "true = show diff only, no changes (default); false = apply update"},
+            },
+        },
+    },
+    {
+        "name": "cms_delete_custom_content_type",
+        "description": (
+            "Permanently delete a custom content type schema. This action CANNOT be undone. "
+            "All content entries based on this schema will lose their schema reference. "
+            "BEFORE calling: confirm the schema ID with the user. "
+            "Workflow: dry_run=true (default) fetches and shows the full schema — no deletion. "
+            "Show the preview to the user. Once they explicitly confirm, call again with dry_run=false AND confirm_delete=true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id":             {"type": "string",  "description": "Custom content type schema ID (MongoDB ObjectID)"},
                 "dry_run":        {"type": "boolean", "description": "true = preview only (default); false = delete (also requires confirm_delete=true)"},
                 "confirm_delete": {"type": "boolean", "description": "Must be explicitly set to true — together with dry_run=false — to execute the deletion"},
             },
@@ -780,6 +928,34 @@ _CONFIRM_REQUIRED = {
 }
 
 
+# ── Live-blog post validator ──────────────────────────────────────────────────
+
+def _check_live_blog_post(credentials, post_id):
+    """Return an error dict if post_id doesn't exist or isn't a LiveBlog; else None."""
+    post = cms_get(credentials, f"/post/{post_id}/")
+    if "error_type" in post:
+        if post.get("error_type") == "not_found":
+            return {
+                "error_type": "not_found",
+                "message": (
+                    f"Post {post_id} was not found in the CMS. "
+                    "Check that the post ID is correct and that the post exists."
+                ),
+                "retryable": False,
+            }
+        return post
+    if post.get("type") != "LiveBlog":
+        return {
+            "error_type": "bad_request",
+            "message": (
+                f"Post {post_id} is a '{post.get('type')}' post, not a LiveBlog. "
+                "Live blog updates can only be added to LiveBlog posts."
+            ),
+            "retryable": False,
+        }
+    return None
+
+
 # ── Tool dispatcher ───────────────────────────────────────────────────────────
 
 @newrelic.agent.function_trace(name="call_cms_tool", group="Tool")
@@ -923,9 +1099,37 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                         ),
                         "retryable": False,
                     }
+                # after_para is Article-specific (ad insertion point after N paragraphs).
+                # Only inject for Article — sending it to other types causes serializer errors.
+                if payload.get("type") == "Article":
+                    payload.setdefault("after_para", 0)
+                # Web Story and Gallery require type-specific structured content (AMP story
+                # slides / gallery images). The API returns the unhelpful "No data provided"
+                # when this content is absent. Catch it here with an actionable message.
+                post_type = payload.get("type", "")
+                if post_type == "Web Story" and not payload.get("content") and not payload.get("custom_entity"):
+                    return {
+                        "error_type": "missing_required_field",
+                        "message": (
+                            "Web Story posts require AMP story slide content in the 'content' field. "
+                            "Create an empty Web Story draft via the Publive dashboard first, "
+                            "then use cms_update_post to update other fields programmatically."
+                        ),
+                        "retryable": False,
+                    }
+                if post_type == "Gallery" and not payload.get("content") and not payload.get("custom_entity"):
+                    return {
+                        "error_type": "missing_required_field",
+                        "message": (
+                            "Gallery posts require gallery image data in the 'content' or 'custom_entity' field. "
+                            "Create an empty Gallery draft via the Publive dashboard first, "
+                            "then use cms_update_post to update other fields programmatically."
+                        ),
+                        "retryable": False,
+                    }
                 # Coerce integer fields: AI clients sometimes send "156228" (string)
                 # instead of 156228 (int), which causes DRF "Enter a valid integer."
-                for _int_field in ("primary_category", "banner_url"):
+                for _int_field in ("primary_category", "banner_url", "after_para"):
                     if _int_field in payload:
                         try:
                             payload[_int_field] = int(payload[_int_field])
@@ -940,7 +1144,33 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                     return cms_post(credentials, "/post/", payload)
                 if dry_run:
                     return {"dry_run": True, "preview": _preview_create("Post", payload)}
-                return cms_post(credentials, "/post/", payload)
+                result = cms_post(credentials, "/post/", payload)
+                # "No data provided" from the API means the type needs structured content
+                # that wasn't supplied or was malformed. Return an actionable message instead
+                # of the opaque upstream error.
+                if (
+                    isinstance(result, dict)
+                    and result.get("error_type") == "bad_request"
+                    and "no data provided" in result.get("message", "").lower()
+                ):
+                    _type_hints = {
+                        "Web Story": (
+                            "Web Story posts require valid AMP story slide markup in the 'content' field. "
+                            "Create the post via the Publive dashboard first, then update other fields via cms_update_post."
+                        ),
+                        "Gallery": (
+                            "Gallery posts require gallery image data in the 'content' or 'custom_entity' field. "
+                            "Create the post via the Publive dashboard first, then update other fields via cms_update_post."
+                        ),
+                        "Article": (
+                            "Article post creation is not currently supported via the API (server-side limitation). "
+                            "Use LiveBlog, CustomPage, or BlankPage instead, or create the post via the Publive dashboard."
+                        ),
+                    }
+                    hint = _type_hints.get(post_type)
+                    if hint:
+                        return {"error_type": "bad_request", "message": hint, "retryable": False}
+                return result
 
         if name == "cms_update_post":
             with fn_trace("cms_update_post", group="Tool"):
@@ -1013,6 +1243,9 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 dry_run = args.get("dry_run", True)
                 post_id = args["post_id"]
                 payload = {k: v for k, v in args.items() if k not in ("dry_run", "post_id")}
+                err = _check_live_blog_post(credentials, post_id)
+                if err:
+                    return err
                 if dry_run:
                     return {"dry_run": True, "preview": _preview_create(
                         "Live Blog Update",
@@ -1026,6 +1259,9 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 post_id   = args["post_id"]
                 update_id = args["id"]
                 changes   = {k: v for k, v in args.items() if k not in ("post_id", "id", "dry_run")}
+                err = _check_live_blog_post(credentials, post_id)
+                if err:
+                    return err
                 if dry_run:
                     raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
                     if "error_type" in raw:
@@ -1051,6 +1287,9 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 confirm_delete = args.get("confirm_delete", False)
                 post_id        = args["post_id"]
                 update_id      = args["id"]
+                err = _check_live_blog_post(credentials, post_id)
+                if err:
+                    return err
                 if dry_run:
                     raw = cms_get(credentials, f"/post/{post_id}/live-blog-update/{update_id}/")
                     if "error_type" in raw:
@@ -1130,7 +1369,20 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 payload  = {k: v for k, v in args.items() if k != "dry_run"}
                 if dry_run:
                     return {"dry_run": True, "preview": _preview_create("Custom Component", payload)}
-                return cms_post(credentials, "/entities/content-type/custom-component/", payload)
+                result = cms_post(credentials, "/entities/content-type/custom-component/", payload)
+                if isinstance(result, dict) and result.get("error_type") == "upstream_error":
+                    # Before retrying a failed POST, check whether the component was
+                    # actually created server-side (server committed but returned 500).
+                    # Retrying without this check would create a duplicate.
+                    listing = cms_get(credentials, "/entities/content-type/custom-component/", {"limit": 50})
+                    items = []
+                    if isinstance(listing, dict) and not listing.get("error_type"):
+                        items = listing.get("results") or listing.get("data") or []
+                    for item in items:
+                        if isinstance(item, dict) and item.get("name") == payload.get("name"):
+                            return item
+                    result = cms_post(credentials, "/entities/content-type/custom-component/", payload)
+                return result
 
         if name == "cms_update_custom_component":
             with fn_trace("cms_update_custom_component", group="Tool"):
@@ -1157,6 +1409,56 @@ def call_cms_tool(credentials, name, args):  # noqa: C901
                 if not confirm_delete:
                     return _CONFIRM_REQUIRED
                 return cms_delete(credentials, f"/entities/content-type/custom-component/{component_id}/")
+
+        # ── Custom Content Types ──────────────────────────────────────────────
+
+        if name == "cms_list_custom_content_types":
+            with fn_trace("cms_list_custom_content_types", group="Tool"):
+                return cms_get(credentials, "/entities/content-type/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
+
+        if name == "cms_get_custom_content_type":
+            with fn_trace("cms_get_custom_content_type", group="Tool"):
+                return cms_get(credentials, f"/entities/content-type/{args['id']}/")
+
+        if name == "cms_create_custom_content_type":
+            with fn_trace("cms_create_custom_content_type", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                payload = {k: v for k, v in args.items() if k != "dry_run"}
+                if dry_run:
+                    return {"dry_run": True, "preview": _preview_create("Custom Content Type", payload)}
+                return cms_post(credentials, "/entities/content-type/", payload)
+
+        if name == "cms_update_custom_content_type":
+            with fn_trace("cms_update_custom_content_type", group="Tool"):
+                dry_run = args.get("dry_run", True)
+                type_id = args["id"]
+                changes = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
+                if dry_run:
+                    current = cms_get(credentials, f"/entities/content-type/{type_id}/")
+                    if "error_type" in current:
+                        return current
+                    return {"dry_run": True, "preview": _preview_update("Custom Content Type", type_id, current, changes)}
+                return cms_patch(credentials, f"/entities/content-type/{type_id}/", changes)
+
+        if name == "cms_delete_custom_content_type":
+            with fn_trace("cms_delete_custom_content_type", group="Tool"):
+                dry_run        = args.get("dry_run", True)
+                confirm_delete = args.get("confirm_delete", False)
+                type_id        = args["id"]
+                if dry_run:
+                    item = cms_get(credentials, f"/entities/content-type/{type_id}/")
+                    if "error_type" in item:
+                        return item
+                    return {"dry_run": True, "preview": _preview_delete(
+                        "Custom Content Type", type_id, item,
+                        warning="All content entries based on this schema will lose their schema reference.",
+                    )}
+                if not confirm_delete:
+                    return _CONFIRM_REQUIRED
+                return cms_delete(credentials, f"/entities/content-type/{type_id}/")
 
         # ── Validation ────────────────────────────────────────────────────────
 

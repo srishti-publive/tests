@@ -42,6 +42,8 @@ TOOLS = [
                 "contributors.id__in":          {"type": "string",  "description": "Filter by multiple author IDs comma-separated"},
                 "created_at__gte":              {"type": "string",  "description": "Posts created on or after (ISO 8601)"},
                 "created_at__lte":              {"type": "string",  "description": "Posts created on or before (ISO 8601)"},
+                "primary_category.id__eq":      {"type": "integer", "description": "Filter by primary category ID"},
+                "primary_category.id__in":      {"type": "string",  "description": "Filter by multiple primary category IDs comma-separated"},
                 "word_count__gt":               {"type": "integer", "description": "Word count greater than"},
                 "word_count__lt":               {"type": "integer", "description": "Word count less than"},
             },
@@ -282,15 +284,6 @@ def call_tool(credentials, name, args):
             with fn_trace("list_posts", group="Tool"):
                 page  = args.pop("page",  None)
                 limit = args.pop("limit", None)
-                # primary_category.id__* is not a valid CDS field — strip it so
-                # stale AI clients that haven't refreshed the tool schema don't
-                # cause a 400.  Log a warning so we know it's still being sent.
-                for bad_key in ("primary_category.id__eq", "primary_category.id__in"):
-                    if bad_key in args:
-                        logger.warning(
-                            "list_posts: stripping unsupported field %r before CDS call", bad_key
-                        )
-                        args.pop(bad_key)
                 try:
                     return cds_get(credentials, "/posts/", {"page": page, "limit": limit, **args})
                 except Exception as exc:
@@ -352,7 +345,7 @@ def call_tool(credentials, name, args):
 
         if name == "list_authors":
             with fn_trace("list_authors", group="Tool"):
-                return cds_get(credentials, "/contributors/", {
+                return cds_get(credentials, "/author/", {
                     "page":  args.get("page"),
                     "limit": args.get("limit"),
                 })
@@ -375,7 +368,7 @@ def call_tool(credentials, name, args):
                         ),
                     }
                 try:
-                    return cds_get(credentials, f"/contributor/{identifier}/")
+                    return cds_get(credentials, f"/author/{identifier}/")
                 except Exception as exc:
                     err_str = str(exc).lower()
                     http_status = getattr(getattr(exc, "response", None), "status_code", None)

@@ -5,6 +5,20 @@ What New Relic does for this project, where each piece lives in the code, and ho
 
 ---
 
+## Changelog — current iteration (CMS observability + tool expansion)
+
+| What changed | File | Why |
+|---|---|---|
+| Added §CMS Layer (`cms.*`) attributes table | `NewRelic.md` | `cms_client.py` emits `cms.path`, `cms.method`, `cms.http_status`, `cms.latency_ms`, `cms.response_size_bytes`, `cms.publisher_id`, `cms.url` (span-only) — none were documented |
+| Added CMS-level custom metrics section | `NewRelic.md` | `Custom/CMS/latency_ms`, `Custom/CMS/response_size_bytes`, `Custom/CMS/error_count`, `Custom/CMS/timeout_count` were emitted but not listed |
+| Added CMS performance NRQL queries | `NewRelic.md` | No NRQL existed for CMS write-operation latency, error rates, or slow endpoint detection |
+| Updated Function Traces tool count (18 → 58) | `NewRelic.md` | 39 CMS tools + 19 CDS tools now registered; 5 new custom content type tools added this iteration |
+| Added audit rows 77–81 | `NewRelic.md` | CMS attributes, CMS metrics, CMS NRQL, custom content type tool coverage, and custom component schema fix tracked |
+| Fixed custom component tool description | `cms_tools.py` | `content` (HTML) field replaced with `field_types` / `meta_data` / `settings` — root cause of 500 errors |
+| Added 5 Custom Content Type tools | `cms_tools.py` | `cms_list/get/create/update/delete_custom_content_type` — full CRUD at `/entities/content-type/` was missing entirely |
+
+---
+
 ## Changelog — latest iteration (doc audit pass)
 
 | What changed | File | Why |
@@ -89,7 +103,7 @@ mcp_endpoint [Transport]
               └── cds_get [CDS]   ← where most latency lives
 ```
 
-Every one of the 18 tools gets its own segment. Auth credential validation (`_validate_cds`) is also traced so a slow CDS call during login is visible.
+Every one of the **58 tools** (19 CDS read tools + 39 CMS write tools) gets its own named segment. Auth credential validation (`_validate_cds`) is also traced so a slow CDS call during login is visible.
 
 **Where:** `@newrelic.agent.function_trace(...)` decorators and `fn_trace()` context managers in `views.py`, `tools.py`, `cds_client.py`, `auth_app/views.py`.
 
@@ -160,6 +174,28 @@ Key-value pairs attached to each transaction. Let you answer questions like "whi
 | `cds.timed_out` | boolean | True if the request timed out (all attempts) |
 | `cds.url` | string *(span-only)* | Full CDS request URL — set via `add_custom_span_attribute()`; visible in the NR trace waterfall but not in `FROM Transaction` queries |
 | `cds.path` | string *(span-only)* | URL path component of the CDS request — set via `add_custom_span_attribute()` |
+
+### CMS Layer (`cms.*`)
+
+Emitted by `mcp_app/cms_client.py` on every CMS write operation (POST, PATCH, DELETE) and read (GET).
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `cms.path` | string | CMS API path (e.g. `/post/`, `/category/12/`) |
+| `cms.method` | string | HTTP verb: `GET`, `POST`, `PATCH`, `DELETE` |
+| `cms.publisher_id` | string | Publisher making the request |
+| `cms.http_status` | integer | CMS HTTP response code |
+| `cms.latency_ms` | float | CMS round-trip time in ms |
+| `cms.response_size_bytes` | integer | CMS response body size in bytes |
+| `cms.url` | string *(span-only)* | Full CMS request URL — set via `add_custom_span_attribute()`; visible in the NR trace waterfall but not in `FROM Transaction` queries |
+
+**Error attributes** (also set on `error.*` when a CMS call fails):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `error.layer` | string | Always `"cms"` for CMS failures |
+| `error.cms_path` | string | CMS path that failed |
+| `error.category` | string | `timeout`, `auth_error`, `not_found`, `bad_request`, `upstream_error`, `system_error` |
 
 ### Auth Layer (`auth.*`)
 
@@ -267,6 +303,17 @@ Unlike events (30-day retention), custom metrics keep data for 13 months and can
 | `Custom/CDS/error_count` | Total CDS failures |
 | `Custom/CDS/timeout_count` | CDS calls that timed out (all attempts) |
 | `Custom/CDS/retry_count` | CDS calls that required at least one retry |
+
+### CMS-level
+
+| Metric | Measures |
+|--------|----------|
+| `Custom/CMS/latency_ms` | CMS API round-trip time (all verbs — GET, POST, PATCH, DELETE) |
+| `Custom/CMS/response_size_bytes` | CMS response body size for successful calls |
+| `Custom/CMS/error_count` | Total CMS failures (4xx + 5xx + network errors) |
+| `Custom/CMS/timeout_count` | CMS calls that timed out (10 s timeout, no retry on CMS) |
+
+> **CMS vs CDS client differences:** the CDS client retries once on 408/timeout and emits `Custom/CDS/retry_count`; the CMS client does **not** retry (write operations are not idempotent). There is therefore no `Custom/CMS/retry_count` metric — a CMS timeout means the operation failed.
 
 ### Auth-level *(new)*
 
@@ -485,6 +532,46 @@ SELECT
 FROM Transaction
 WHERE mcp.tool_name IS NOT NULL
 FACET mcp.tool_name SINCE 1 hour ago
+```
+
+### CMS performance
+
+```sql
+-- CMS write latency by path (slowest endpoints)
+SELECT average(cms.latency_ms) AS avg_ms, percentile(cms.latency_ms, 95) AS p95_ms
+FROM Transaction
+WHERE cms.path IS NOT NULL
+FACET cms.path, cms.method SINCE 1 hour ago ORDER BY avg_ms DESC LIMIT 20
+
+-- CMS error rate by endpoint
+SELECT filter(count(*), WHERE cms.http_status >= 400) AS errors, count(*) AS total,
+       filter(count(*), WHERE cms.http_status >= 400) * 100.0 / count(*) AS error_pct
+FROM Transaction
+WHERE cms.path IS NOT NULL
+FACET cms.path, cms.method SINCE 1 hour ago
+
+-- CMS 4xx vs 5xx breakdown (bad requests vs server errors)
+SELECT filter(count(*), WHERE cms.http_status >= 400 AND cms.http_status < 500) AS client_errors,
+       filter(count(*), WHERE cms.http_status >= 500) AS server_errors
+FROM Transaction
+WHERE cms.path IS NOT NULL
+FACET cms.path SINCE 24 hours ago
+
+-- CMS timeout rate over time
+SELECT rate(sum(Custom/CMS/timeout_count), 1 minute)
+FROM Metric TIMESERIES SINCE 3 hours ago
+
+-- CMS write operations by tool and method (create/update/delete breakdown)
+SELECT count(*) FROM Transaction
+WHERE cms.method IN ('POST', 'PATCH', 'DELETE')
+FACET mcp.tool_name, cms.method SINCE 24 hours ago ORDER BY count(*) DESC LIMIT MAX
+
+-- Slow CMS calls (latency > 5 s) with full context
+SELECT timestamp, mcp.tool_name, cms.path, cms.method, cms.latency_ms, cms.http_status,
+       mcp.session_id
+FROM Transaction
+WHERE cms.latency_ms > 5000
+SINCE 24 hours ago ORDER BY cms.latency_ms DESC LIMIT 50
 ```
 
 ### CDS performance
@@ -2369,3 +2456,8 @@ If `OAuthToken.objects.get(token=...)` starts appearing in slow query lists, it 
 | 74 | Deployment markers | ✅ `Procfile` release step runs `newrelic-admin record-deploy` with `:-unknown` fallback defaults on every Railway deploy |
 | 75 | SIGTERM harvest flush | ✅ `wsgi.py` SIGTERM handler calls `newrelic.agent.shutdown_agent(timeout=10)` so in-flight custom events are not lost on Railway container kill |
 | 76 | Six additional alert specs | ✅ Alerts #20–25: queue overflow, session abandonment, OAuth stopped, probe wave, prompt drop, cross-worker routing — defined in §Additional Alert Specs |
+| 77 | CMS layer attributes | ✅ `cms.path`, `cms.method`, `cms.http_status`, `cms.latency_ms`, `cms.response_size_bytes`, `cms.publisher_id`, `cms.url` (span) emitted by `cms_client.py` on every verb; documented in §3 |
+| 78 | CMS-level custom metrics | ✅ `Custom/CMS/latency_ms`, `Custom/CMS/response_size_bytes`, `Custom/CMS/error_count`, `Custom/CMS/timeout_count` — 13-month retention; documented in §5 |
+| 79 | CMS performance NRQL | ✅ Six CMS-specific queries added: latency by endpoint, error rate, 4xx/5xx breakdown, timeout rate, write-op breakdown, slow-call detail |
+| 80 | Custom content type tools (5 new) | ✅ `cms_list/get/create/update/delete_custom_content_type` — all 5 have `fn_trace` segments and inherit per-tool `Custom/Tool/{name}/*` metrics automatically |
+| 81 | Custom component schema fix | ✅ `cms_create/update_custom_component` — `content` (HTML) field removed; replaced with `field_types`, `meta_data`, `settings` matching the actual API schema; resolves 500 errors that were inflating `Custom/CMS/error_count` |
