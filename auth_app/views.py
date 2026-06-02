@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import newrelic.agent
 import requests
 from django.conf import settings
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -21,7 +22,13 @@ from django.views.decorators.http import require_http_methods
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 
 from .models import OAuthClient, OAuthCode, OAuthToken
-from .services import check_origin, validate_cds_credentials, validate_redirect_uris
+from .services import (
+    check_origin,
+    parse_oauth_token_body,
+    redirect_uri_is_registered,
+    validate_cds_credentials,
+    validate_redirect_uris,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +40,7 @@ def oauth_protected_resource(request: HttpRequest, resource_path: str = "") -> J
     base_url = settings.BASE_URL.rstrip("/")
     return JsonResponse({
         "resource": f"{base_url}/mcp",
-        "authorization_servers": [base_url],
+        "authorization_servers": [f"{base_url}/.well-known/oauth-authorization-server"],
     })
 
 
@@ -120,10 +127,17 @@ def oauth_register(request: HttpRequest) -> JsonResponse:
 
 # ── Authorization endpoint ────────────────────────────────────────────────────
 
-@require_http_methods(["GET", "POST"])
-@newrelic.agent.function_trace(name="oauth_authorize", group="Auth")
-def oauth_authorize(request: HttpRequest) -> HttpResponse:
-    """Show the authorization form (GET) or process credential submission and issue an auth code (POST)."""
+_IMPLICIT_RESPONSE_TYPES = frozenset({"token", "id_token token", "code token", "code id_token token"})
+
+
+def _oauth_authorize_error(
+    request: HttpRequest,
+    *,
+    error: str,
+    description: str,
+    status: int = 400,
+) -> HttpResponse:
+    """Return an OAuth error for browser-based authorize requests."""
     if request.method == "GET":
         return render(request, "authorize.html", {
             "client_id": request.GET.get("client_id", ""),
@@ -131,10 +145,68 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
             "state": request.GET.get("state", ""),
             "code_challenge": request.GET.get("code_challenge", ""),
             "code_challenge_method": request.GET.get("code_challenge_method", "S256"),
+            "error": description,
+        }, status=status)
+    return JsonResponse({"error": error, "error_description": description}, status=status)
+
+
+def _validate_authorize_request(
+    client_id: Optional[str],
+    redirect_uri: str,
+    response_type: str,
+) -> Optional[tuple[str, str]]:
+    """Return (error, description) when the authorize request is invalid; else None."""
+    if response_type in _IMPLICIT_RESPONSE_TYPES:
+        return "unsupported_response_type", "Implicit grant is not supported"
+    if response_type != "code":
+        return "unsupported_response_type", "Only response_type=code is supported"
+
+    if not client_id:
+        return "invalid_request", "client_id is required"
+
+    try:
+        oauth_client = OAuthClient.objects.get(client_id=client_id)
+    except OAuthClient.DoesNotExist:
+        return "invalid_client", "Unknown client"
+
+    if oauth_client.expires_at and oauth_client.expires_at < timezone.now():
+        return "invalid_client", "Client registration has expired"
+
+    registered_uris: list = oauth_client.redirect_uris or []
+    if not registered_uris:
+        return "invalid_request", "Client has no registered redirect URIs"
+    if not redirect_uri:
+        return "invalid_request", "redirect_uri is required"
+    if not redirect_uri_is_registered(redirect_uri, registered_uris):
+        return "invalid_request", "redirect_uri does not match a registered value"
+
+    return None
+
+
+@require_http_methods(["GET", "POST"])
+@newrelic.agent.function_trace(name="oauth_authorize", group="Auth")
+def oauth_authorize(request: HttpRequest) -> HttpResponse:
+    """Show the authorization form (GET) or process credential submission and issue an auth code (POST)."""
+    if request.method == "GET":
+        response_type: str = request.GET.get("response_type", "code")
+        client_id: str = request.GET.get("client_id", "")
+        redirect_uri: str = request.GET.get("redirect_uri", "")
+        auth_err = _validate_authorize_request(client_id or None, redirect_uri, response_type)
+        if auth_err:
+            error_code, description = auth_err
+            return _oauth_authorize_error(
+                request, error=error_code, description=description,
+            )
+        return render(request, "authorize.html", {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": request.GET.get("state", ""),
+            "code_challenge": request.GET.get("code_challenge", ""),
+            "code_challenge_method": request.GET.get("code_challenge_method", "S256"),
         })
 
     set_txn_name("Auth/pkce_authorize", group="Auth")
-    client_id: Optional[str] = request.POST.get("client_id") or request.GET.get("client_id")
+    client_id: Optional[str] = request.POST.get("client_id")
     add_attrs([
         ("auth.flow", "oauth_pkce"),
         ("auth.client_id", client_id),
@@ -159,16 +231,14 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
     }
 
     try:
-        # Validate the client is registered and has not expired.
-        try:
-            oauth_client = OAuthClient.objects.get(client_id=client_id)
-        except OAuthClient.DoesNotExist:
-            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "unknown_client")])
-            ctx["error"] = "Unknown client. Please reconnect your AI client."
-            return render(request, "authorize.html", ctx)
-        if oauth_client.expires_at and oauth_client.expires_at < timezone.now():
-            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "client_expired")])
-            ctx["error"] = "Client registration has expired. Please reconnect your AI client."
+        auth_err = _validate_authorize_request(client_id, redirect_uri, "code")
+        if auth_err:
+            error_code, description = auth_err
+            add_attrs([
+                ("auth.result", "failure"),
+                ("auth.failure_reason", error_code),
+            ])
+            ctx["error"] = description
             return render(request, "authorize.html", ctx)
 
         if not all([publisher_id, api_key, api_secret]):
@@ -232,21 +302,25 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
     """Issue or refresh a bearer token; supports authorization_code and refresh_token grants."""
     set_txn_name("Auth/pkce_token", group="Auth")
 
-    if "application/json" in (request.content_type or ""):
-        try:
-            data = json.loads(request.body)
-        except json.JSONDecodeError:
-            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
-            logger.warning("OAuth token: invalid JSON body")
-            return JsonResponse({"error": "invalid_request"}, status=400)
-    else:
-        data = request.POST
+    data, parse_err = parse_oauth_token_body(request)
+    if parse_err:
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
+        logger.warning("OAuth token: invalid request body content-type=%s", request.content_type)
+        return parse_err
 
     origin_err: Optional[JsonResponse] = check_origin(request)
     if origin_err:
         return origin_err
 
     grant_type: str = data.get("grant_type", "")
+    if grant_type == "implicit":
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "unsupported_grant")])
+        record_metric("Custom/Auth/auth_failure_count", 1)
+        logger.warning("OAuth token: rejected implicit grant")
+        return JsonResponse(
+            {"error": "unsupported_grant_type", "error_description": "Implicit grant is not supported"},
+            status=400,
+        )
     add_attrs([
         ("auth.flow", "oauth_pkce"),
         ("auth.client_id", data.get("client_id")),
@@ -257,38 +331,52 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         # ── Refresh token grant ───────────────────────────────────────────────
         if grant_type == "refresh_token":
             refresh_val: str = data.get("refresh_token", "")
-            try:
-                existing = OAuthToken.objects.get(refresh_token=refresh_val)
-            except OAuthToken.DoesNotExist:
-                add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-                record_metric("Custom/Auth/auth_failure_count", 1)
-                logger.warning("OAuth token: unknown refresh_token")
-                return JsonResponse({"error": "invalid_grant", "error_description": "Unknown refresh token"}, status=400)
-
-            if existing.expires_at < timezone.now():
-                existing.delete()
-                add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-                record_metric("Custom/Auth/auth_failure_count", 1)
-                logger.warning("OAuth token: expired refresh_token client=%s", existing.client_id)
-                return JsonResponse({"error": "invalid_grant", "error_description": "Refresh token expired"}, status=400)
-
-            # Rotate refresh_token (security); keep the same access_token value (stable identity).
             new_refresh: str = secrets.token_urlsafe(32)
-            existing.refresh_token = new_refresh
-            existing.expires_at = timezone.now() + timedelta(days=30)
-            existing.save(update_fields=["refresh_token", "expires_at"])
+            new_expires = timezone.now() + timedelta(days=30)
 
-            publisher_id: str = existing.credentials.get("publisherId", "")
+            with transaction.atomic():
+                try:
+                    existing = (
+                        OAuthToken.objects.select_for_update()
+                        .get(refresh_token=refresh_val)
+                    )
+                except OAuthToken.DoesNotExist:
+                    add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
+                    record_metric("Custom/Auth/auth_failure_count", 1)
+                    logger.warning("OAuth token: unknown refresh_token")
+                    return JsonResponse(
+                        {"error": "invalid_grant", "error_description": "Unknown refresh token"},
+                        status=400,
+                    )
+
+                if existing.expires_at < timezone.now():
+                    existing.delete()
+                    add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
+                    record_metric("Custom/Auth/auth_failure_count", 1)
+                    logger.warning("OAuth token: expired refresh_token client=%s", existing.client_id)
+                    return JsonResponse(
+                        {"error": "invalid_grant", "error_description": "Refresh token expired"},
+                        status=400,
+                    )
+
+                # Atomic rotation: old refresh token is replaced before the response is sent.
+                access_token = existing.token
+                client_id = existing.client_id
+                publisher_id = existing.credentials.get("publisherId", "")
+                existing.refresh_token = new_refresh
+                existing.expires_at = new_expires
+                existing.save(update_fields=["refresh_token", "expires_at"])
+
             add_attrs([
                 ("auth.result", "success"),
                 ("auth.token_reused", True),
                 ("auth.publisher_id", publisher_id),
-                ("auth.client_id", existing.client_id),
+                ("auth.client_id", client_id),
             ])
             record_metric("Custom/Auth/token_refresh_count", 1)
-            logger.info("OAuth token refreshed: publisher=%s client=%s", publisher_id, existing.client_id)
+            logger.info("OAuth token refreshed: publisher=%s client=%s", publisher_id, client_id)
             return JsonResponse({
-                "access_token": existing.token,
+                "access_token": access_token,
                 "token_type": "bearer",
                 "expires_in": 30 * 24 * 3600,
                 "refresh_token": new_refresh,
@@ -327,6 +415,16 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
+
+        token_redirect_uri: str = data.get("redirect_uri", "")
+        if auth_code.redirect_uri and token_redirect_uri != auth_code.redirect_uri:
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_redirect_uri")])
+            record_metric("Custom/Auth/auth_failure_count", 1)
+            logger.warning("OAuth token: redirect_uri mismatch client=%s", data.get("client_id"))
+            return JsonResponse(
+                {"error": "invalid_grant", "error_description": "redirect_uri mismatch"},
+                status=400,
+            )
 
         credentials: dict    = auth_code.credentials
         oauth_client_id: str = data.get("client_id") or auth_code.client_id

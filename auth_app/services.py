@@ -1,9 +1,11 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
 # redirect-URI allowlisting, and CDS credential verification. No HTTP routing here.
 import base64
+import json
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import parse_qs
 
 import newrelic.agent
 import requests
@@ -42,20 +44,53 @@ def check_origin(request: HttpRequest) -> Optional[JsonResponse]:
     )
 
 
-def validate_redirect_uris(uris: list[str]) -> bool:
-    """Return True only when every redirect URI starts with an allowed prefix.
+def get_allowed_redirect_uris() -> set[str]:
+    """Return the exact redirect URIs permitted at dynamic client registration."""
+    uris: list[str] = list(getattr(settings, "OAUTH_ALLOWED_REDIRECT_URIS", []))
+    return set(uris)
 
-    The allowlist is read from settings.OAUTH_ALLOWED_REDIRECT_PREFIXES so it
-    can be extended without a code change.
-    """
-    prefixes: list[str] = getattr(settings, "OAUTH_ALLOWED_REDIRECT_PREFIXES", [
-        "https://claude.ai/",
-        "http://localhost:",
-        "http://127.0.0.1:",
-    ])
-    return all(
-        any(uri.startswith(p) for p in prefixes)
-        for uri in uris
+
+def validate_redirect_uris(uris: list[str]) -> bool:
+    """Return True only when every redirect URI exactly matches an allowed URI."""
+    if not uris:
+        return True
+    allowed = get_allowed_redirect_uris()
+    return all(uri in allowed for uri in uris)
+
+
+def redirect_uri_is_registered(redirect_uri: str, registered_uris: list[str]) -> bool:
+    """Return True when redirect_uri exactly matches a client-registered URI."""
+    return redirect_uri in registered_uris
+
+
+def parse_oauth_token_body(request: HttpRequest) -> tuple[Optional[dict[str, Any]], Optional[JsonResponse]]:
+    """Parse /oauth/token request body from JSON or application/x-www-form-urlencoded."""
+    content_type = (request.content_type or "").split(";", 1)[0].strip().lower()
+
+    if content_type == "application/json":
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError:
+            return None, JsonResponse({"error": "invalid_request"}, status=400)
+        if not isinstance(body, dict):
+            return None, JsonResponse({"error": "invalid_request"}, status=400)
+        return body, None
+
+    if content_type == "application/x-www-form-urlencoded":
+        if request.POST:
+            return request.POST.dict(), None
+        try:
+            parsed = parse_qs(request.body.decode("utf-8"), keep_blank_values=True)
+        except UnicodeDecodeError:
+            return None, JsonResponse({"error": "invalid_request"}, status=400)
+        return {key: values[0] if values else "" for key, values in parsed.items()}, None
+
+    return None, JsonResponse(
+        {
+            "error": "invalid_request",
+            "error_description": "Content-Type must be application/x-www-form-urlencoded or application/json",
+        },
+        status=400,
     )
 
 

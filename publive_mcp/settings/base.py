@@ -89,12 +89,17 @@ OAUTH_ALLOWED_ORIGINS = [
     "https://api.claude.ai",
 ]
 
-# Redirect URIs allowed during dynamic client registration.
-OAUTH_ALLOWED_REDIRECT_PREFIXES = [
-    "https://claude.ai/",
-    "http://localhost:",
-    "http://127.0.0.1:",
+# Exact redirect URIs allowed during dynamic client registration (OAuth 2.1).
+# Extend at deploy time via OAUTH_ALLOWED_REDIRECT_URIS_EXTRA (comma-separated).
+OAUTH_ALLOWED_REDIRECT_URIS = [
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
 ]
+_extra_redirect_uris = os.environ.get("OAUTH_ALLOWED_REDIRECT_URIS_EXTRA", "")
+if _extra_redirect_uris:
+    OAUTH_ALLOWED_REDIRECT_URIS.extend(
+        uri.strip() for uri in _extra_redirect_uris.split(",") if uri.strip()
+    )
 
 # ── Static files ──────────────────────────────────────────────────────────────
 
