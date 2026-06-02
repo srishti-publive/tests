@@ -345,7 +345,7 @@ def call_tool(credentials, name, args):
 
         if name == "list_authors":
             with fn_trace("list_authors", group="Tool"):
-                return cds_get(credentials, "/author/", {
+                return cds_get(credentials, "/authors/", {
                     "page":  args.get("page"),
                     "limit": args.get("limit"),
                 })
