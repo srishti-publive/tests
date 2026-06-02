@@ -95,12 +95,15 @@ SESSION_SAVE_EVERY_REQUEST = True
 OAUTH_ALLOWED_ORIGINS = [
     "https://claude.ai",
     "https://api.claude.ai",
+    "https://claude.com",
+    "https://chatgpt.com",
 ]
 
 # Exact redirect URIs allowed during dynamic client registration (OAuth 2.1).
 OAUTH_ALLOWED_REDIRECT_URIS = [
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
 ]
 _extra_redirect_uris = os.environ.get("OAUTH_ALLOWED_REDIRECT_URIS_EXTRA", "")
 if _extra_redirect_uris:

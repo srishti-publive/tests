@@ -108,14 +108,17 @@ def _get_credentials(request):
     """
     auth_header = request.META.get("HTTP_AUTHORIZATION", "")
     if auth_header.startswith("Bearer "):
-        token_value = auth_header[len("Bearer "):]
+        token_value = auth_header[len("Bearer "):].strip()
         try:
             from auth_app.models import OAuthToken
             oauth_token = OAuthToken.objects.get(token=token_value)
             if oauth_token.expires_at >= timezone.now():
                 return oauth_token.credentials, oauth_token.expires_at
-        except Exception:
+        except OAuthToken.DoesNotExist:
             pass
+        except Exception:
+            logger.error("Token lookup failed: unexpected exception", exc_info=True)
+            raise
     return request.session.get("credentials"), None
 
 
