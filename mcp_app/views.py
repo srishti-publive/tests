@@ -589,17 +589,26 @@ def health_check(request):
 @csrf_exempt
 @newrelic.agent.function_trace(name="mcp_endpoint", group="Transport")
 def mcp_endpoint(request):
+    has_bearer = request.META.get("HTTP_AUTHORIZATION", "").startswith("Bearer ")
+    logger.info(
+        "MCP request: method=%s has_bearer=%s ua=%s",
+        request.method,
+        has_bearer,
+        request.META.get("HTTP_USER_AGENT", "unknown")[:80],
+    )
     credentials, token_expires_at = _get_credentials(request)
     if not credentials:
         logger.warning(
-            "MCP authentication failed: method=%s",
+            "MCP authentication failed: method=%s has_bearer=%s",
             request.method,
+            has_bearer,
         )
         add_attrs([
             ("mcp.authenticated", False),
         ])
         return _unauth(request)
 
+    logger.info("MCP authenticated: method=%s", request.method)
     _add_mcp_client_attrs(request)
 
     if request.method == "GET":
