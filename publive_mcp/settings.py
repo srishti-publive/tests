@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 DEBUG = os.environ.get("DEBUG", "False") == "True"
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 
 # ── Apps & Middleware ─────────────────────────────────────────────────────────
@@ -86,6 +86,15 @@ SESSION_COOKIE_SAMESITE = "Lax"
 # Refresh session TTL on every request so an active session never expires
 # while the user is still using it.
 SESSION_SAVE_EVERY_REQUEST = True
+
+# ── HTTPS / TLS ───────────────────────────────────────────────────────────────
+# Railway terminates TLS at its edge proxy and forwards requests over plain
+# HTTP internally.  Tell Django to trust the forwarded-proto header so that
+# SESSION_COOKIE_SECURE and other HTTPS checks work correctly.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = 31536000          # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 # ── OAuth security ────────────────────────────────────────────────────────────
 

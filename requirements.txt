@@ -5,7 +5,7 @@ whitenoise==6.6.0
 dj-database-url==2.1.0
 psycopg2-binary>=2.9.10
 python-dotenv==1.0.0
-newrelic
+newrelic==13.1.0
 django-redis>=5.4.0
 redis>=5.0.0
 python-json-logger>=2.0.7
