@@ -1,3 +1,4 @@
+import base64
 import logging
 import time
 
@@ -5,9 +6,10 @@ import newrelic.agent
 import requests
 
 from .nr_utils import add_attrs, notice_err, set_txn_name
-from .utils import CDS_BASE_URL, classify_error_category, make_basic_token, require_publisher_id, slugify_path
 
 logger = logging.getLogger(__name__)
+
+_CDS_BASE = "https://cds-beta.thepublive.com/publisher/{publisher_id}"
 
 # Client-side timeout per attempt (seconds).  Must be well under any AI-client
 # timeout so we can retry and still return a useful error rather than hanging.
@@ -17,13 +19,52 @@ _REQUEST_TIMEOUT = 5
 _RETRY_BACKOFF = 1
 
 
+def _slugify_path(path: str) -> str:
+    slug = path.strip("/").replace("/", "_")
+    return slug or "root"
+
+
+def _is_retryable(exc) -> bool:
+    """True for transient failures worth retrying once: timeouts and HTTP 408."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 408
+
+
+def _cds_error_category(exc, http_status) -> str:
+    """Classify a CDS failure for the error.category transaction attribute.
+
+    Categories (used consistently across all layers):
+      timeout       — requests.Timeout or HTTP 408
+      auth_error    — HTTP 401 (bad / expired credentials)
+      client_error  — HTTP 4xx other than 401/408 (bad request from our side)
+      upstream_error — HTTP 5xx (CDS internal failure)
+      system_error  — anything else (network error, unexpected exception)
+    """
+    if isinstance(exc, requests.exceptions.Timeout) or http_status == 408:
+        return "timeout"
+    if http_status == 401:
+        return "auth_error"
+    if http_status and 400 <= http_status < 500:
+        return "client_error"
+    if http_status and 500 <= http_status < 600:
+        return "upstream_error"
+    return "system_error"
+
+
 @newrelic.agent.function_trace(name="cds_get", group="CDS")
 def cds_get(credentials, path, params=None):
-    set_txn_name(f"CDS/{slugify_path(path)}", group="CDS")
+    set_txn_name(f"CDS/{_slugify_path(path)}", group="CDS")
 
-    publisher_id = require_publisher_id(credentials)
-    token = make_basic_token(credentials.get("apiKey", ""), credentials.get("apiSecret", ""))
-    url   = CDS_BASE_URL.format(publisher_id=publisher_id) + path
+    publisher_id = credentials.get("publisherId", "")
+    if not publisher_id:
+        raise Exception("No publisher ID in credentials — please re-authenticate")
+
+    api_key    = credentials.get("apiKey", "")
+    api_secret = credentials.get("apiSecret", "")
+    token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+    url   = _CDS_BASE.format(publisher_id=publisher_id) + path
 
     # Span-level attributes for distributed tracing — visible in NR trace waterfall
     # even when the CDS service is on a separate entity.
@@ -99,19 +140,21 @@ def cds_get(credentials, path, params=None):
             last_exc = exc
             if attempt == 0:
                 continue  # retry once
-            break  # both attempts timed out
+            # Both attempts timed out — fall through to error handling below
+            break
 
         except Exception as exc:
             last_exc = exc
             break  # non-retryable — surface immediately
 
     # ── All attempts exhausted ────────────────────────────────────────────────
-    latency_ms  = round((time.perf_counter() - t0) * 1000, 2)
+    latency_ms = round((time.perf_counter() - t0) * 1000, 2)
     http_status = getattr(getattr(last_exc, "response", None), "status_code", None)
-    is_timeout  = isinstance(last_exc, requests.exceptions.Timeout) or http_status == 408
-    retried     = retry_count > 0
-    error_category = classify_error_category(last_exc, http_status)
+    is_timeout = isinstance(last_exc, requests.exceptions.Timeout) or http_status == 408
+    retried = retry_count > 0
+    error_category = _cds_error_category(last_exc, http_status)
 
+    # Set timeout and retry flags as transaction + span attributes for NRQL filtering
     if is_timeout:
         add_attrs([("cds.timed_out", True)])
         newrelic.agent.add_custom_span_attribute("cds.timed_out", True)

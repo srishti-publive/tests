@@ -25,12 +25,6 @@ from .services import check_origin, validate_cds_credentials, validate_redirect_
 
 logger = logging.getLogger(__name__)
 
-# ── Token lifetime ────────────────────────────────────────────────────────────
-# Single constant for the OAuth token TTL.  Previously the value 30 appeared
-# four times inside oauth_token() as timedelta(days=30) and 30 * 24 * 3600.
-_TOKEN_TTL_DAYS: int = 30
-_TOKEN_TTL_SECONDS: int = _TOKEN_TTL_DAYS * 24 * 3600
-
 
 # ── OAuth discovery ───────────────────────────────────────────────────────────
 
@@ -165,6 +159,7 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
     }
 
     try:
+        # Validate the client is registered and has not expired.
         try:
             oauth_client = OAuthClient.objects.get(client_id=client_id)
         except OAuthClient.DoesNotExist:
@@ -228,147 +223,13 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
         raise
 
 
-# ── Token endpoint — grant handlers ──────────────────────────────────────────
-# oauth_token() previously contained two completely independent code paths
-# (refresh_token grant and authorization_code grant) inside one 160-line function.
-# Each path is now its own function; oauth_token() is a thin router.
-
-def _handle_refresh_grant(data) -> JsonResponse:
-    """Issue a rotated token for an existing valid refresh_token."""
-    refresh_val: str = data.get("refresh_token", "")
-    try:
-        existing = OAuthToken.objects.get(refresh_token=refresh_val)
-    except OAuthToken.DoesNotExist:
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: unknown refresh_token")
-        return JsonResponse({"error": "invalid_grant", "error_description": "Unknown refresh token"}, status=400)
-
-    if existing.expires_at < timezone.now():
-        existing.delete()
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: expired refresh_token client=%s", existing.client_id)
-        return JsonResponse({"error": "invalid_grant", "error_description": "Refresh token expired"}, status=400)
-
-    # Rotate refresh_token (security); keep the same access_token value (stable identity).
-    new_refresh: str = secrets.token_urlsafe(32)
-    existing.refresh_token = new_refresh
-    existing.expires_at    = timezone.now() + timedelta(days=_TOKEN_TTL_DAYS)
-    existing.save(update_fields=["refresh_token", "expires_at"])
-
-    publisher_id: str = existing.credentials.get("publisherId", "")
-    add_attrs([
-        ("auth.result", "success"),
-        ("auth.token_reused", True),
-        ("auth.publisher_id", publisher_id),
-        ("auth.client_id", existing.client_id),
-    ])
-    record_metric("Custom/Auth/token_refresh_count", 1)
-    logger.info("OAuth token refreshed: publisher=%s client=%s", publisher_id, existing.client_id)
-    return JsonResponse({
-        "access_token": existing.token,
-        "token_type":   "bearer",
-        "expires_in":   _TOKEN_TTL_SECONDS,
-        "refresh_token": new_refresh,
-    })
-
-
-def _handle_code_grant(data) -> JsonResponse:
-    """Issue a new bearer token after verifying a PKCE authorization code."""
-    code: str          = data.get("code", "")
-    code_verifier: str = data.get("code_verifier", "")
-
-    try:
-        auth_code = OAuthCode.objects.get(code=code)
-    except OAuthCode.DoesNotExist:
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: unknown code client=%s", data.get("client_id"))
-        return JsonResponse({"error": "invalid_grant", "error_description": "Unknown code"}, status=400)
-
-    if auth_code.expires_at < timezone.now():
-        auth_code.delete()
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: expired code client=%s", data.get("client_id"))
-        return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
-
-    expected: str = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-    if expected != auth_code.code_challenge:
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_pkce")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
-        return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
-
-    credentials: dict    = auth_code.credentials
-    oauth_client_id: str = data.get("client_id") or auth_code.client_id
-    publisher_id         = credentials.get("publisherId", "")
-    auth_code.delete()
-
-    # Upsert: return the existing valid token for this client+publisher so
-    # the AI client keeps the same stable token identity across re-authorisations.
-    existing = OAuthToken.objects.filter(
-        client_id=oauth_client_id,
-        expires_at__gt=timezone.now(),
-    ).filter(credentials__publisherId=publisher_id).first()
-
-    if existing:
-        remaining: int = int((existing.expires_at - timezone.now()).total_seconds())
-        # Backfill refresh_token for tokens created before the refresh_token migration.
-        if not existing.refresh_token:
-            existing.refresh_token = secrets.token_urlsafe(32)
-            existing.save(update_fields=["refresh_token"])
-        add_attrs([
-            ("auth.result", "success"),
-            ("auth.token_reused", True),
-            ("auth.publisher_id", publisher_id),
-            ("auth.client_id", oauth_client_id),
-        ])
-        logger.info(
-            "OAuth token reused (stable): publisher=%s client=%s expires_in=%ds",
-            publisher_id, oauth_client_id, remaining,
-        )
-        return JsonResponse({
-            "access_token":  existing.token,
-            "token_type":    "bearer",
-            "expires_in":    remaining,
-            "refresh_token": existing.refresh_token,
-        })
-
-    token: str       = secrets.token_urlsafe(32)
-    new_refresh: str = secrets.token_urlsafe(32)
-    OAuthToken.objects.create(
-        token=token,
-        client_id=oauth_client_id,
-        refresh_token=new_refresh,
-        credentials=credentials,
-        expires_at=timezone.now() + timedelta(days=_TOKEN_TTL_DAYS),
-    )
-
-    add_attrs([
-        ("auth.result", "success"),
-        ("auth.token_reused", False),
-        ("auth.publisher_id", publisher_id),
-        ("auth.client_id", oauth_client_id),
-    ])
-    record_metric("Custom/Auth/token_issued_count", 1)
-    logger.info("OAuth token issued (new): publisher=%s client=%s", publisher_id, oauth_client_id)
-    return JsonResponse({
-        "access_token":  token,
-        "token_type":    "bearer",
-        "expires_in":    _TOKEN_TTL_SECONDS,
-        "refresh_token": new_refresh,
-    })
-
+# ── Token endpoint ────────────────────────────────────────────────────────────
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @newrelic.agent.function_trace(name="oauth_token", group="Auth")
 def oauth_token(request: HttpRequest) -> JsonResponse:
-    """Route to the correct grant handler; supports authorization_code and refresh_token."""
+    """Issue or refresh a bearer token; supports authorization_code and refresh_token grants."""
     set_txn_name("Auth/pkce_token", group="Auth")
 
     if "application/json" in (request.content_type or ""):
@@ -387,21 +248,145 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
 
     grant_type: str = data.get("grant_type", "")
     add_attrs([
-        ("auth.flow",       "oauth_pkce"),
-        ("auth.client_id",  data.get("client_id")),
+        ("auth.flow", "oauth_pkce"),
+        ("auth.client_id", data.get("client_id")),
         ("auth.grant_type", grant_type),
     ])
 
     try:
+        # ── Refresh token grant ───────────────────────────────────────────────
         if grant_type == "refresh_token":
-            return _handle_refresh_grant(data)
-        if grant_type == "authorization_code":
-            return _handle_code_grant(data)
+            refresh_val: str = data.get("refresh_token", "")
+            try:
+                existing = OAuthToken.objects.get(refresh_token=refresh_val)
+            except OAuthToken.DoesNotExist:
+                add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
+                record_metric("Custom/Auth/auth_failure_count", 1)
+                logger.warning("OAuth token: unknown refresh_token")
+                return JsonResponse({"error": "invalid_grant", "error_description": "Unknown refresh token"}, status=400)
 
-        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
-        record_metric("Custom/Auth/auth_failure_count", 1)
-        logger.warning("OAuth token: unsupported grant_type=%s client=%s", grant_type, data.get("client_id"))
-        return JsonResponse({"error": "unsupported_grant_type"}, status=400)
+            if existing.expires_at < timezone.now():
+                existing.delete()
+                add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
+                record_metric("Custom/Auth/auth_failure_count", 1)
+                logger.warning("OAuth token: expired refresh_token client=%s", existing.client_id)
+                return JsonResponse({"error": "invalid_grant", "error_description": "Refresh token expired"}, status=400)
+
+            # Rotate refresh_token (security); keep the same access_token value (stable identity).
+            new_refresh: str = secrets.token_urlsafe(32)
+            existing.refresh_token = new_refresh
+            existing.expires_at = timezone.now() + timedelta(days=30)
+            existing.save(update_fields=["refresh_token", "expires_at"])
+
+            publisher_id: str = existing.credentials.get("publisherId", "")
+            add_attrs([
+                ("auth.result", "success"),
+                ("auth.token_reused", True),
+                ("auth.publisher_id", publisher_id),
+                ("auth.client_id", existing.client_id),
+            ])
+            record_metric("Custom/Auth/token_refresh_count", 1)
+            logger.info("OAuth token refreshed: publisher=%s client=%s", publisher_id, existing.client_id)
+            return JsonResponse({
+                "access_token": existing.token,
+                "token_type": "bearer",
+                "expires_in": 30 * 24 * 3600,
+                "refresh_token": new_refresh,
+            })
+
+        # ── Authorization code grant ──────────────────────────────────────────
+        if grant_type != "authorization_code":
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
+            record_metric("Custom/Auth/auth_failure_count", 1)
+            logger.warning("OAuth token: unsupported grant_type=%s client=%s", grant_type, data.get("client_id"))
+            return JsonResponse({"error": "unsupported_grant_type"}, status=400)
+
+        code: str          = data.get("code", "")
+        code_verifier: str = data.get("code_verifier", "")
+
+        try:
+            auth_code = OAuthCode.objects.get(code=code)
+        except OAuthCode.DoesNotExist:
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
+            record_metric("Custom/Auth/auth_failure_count", 1)
+            logger.warning("OAuth token: unknown code client=%s", data.get("client_id"))
+            return JsonResponse({"error": "invalid_grant", "error_description": "Unknown code"}, status=400)
+
+        if auth_code.expires_at < timezone.now():
+            auth_code.delete()
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
+            record_metric("Custom/Auth/auth_failure_count", 1)
+            logger.warning("OAuth token: expired code client=%s", data.get("client_id"))
+            return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
+
+        expected: str = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        if expected != auth_code.code_challenge:
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_pkce")])
+            record_metric("Custom/Auth/auth_failure_count", 1)
+            logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
+            return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
+
+        credentials: dict    = auth_code.credentials
+        oauth_client_id: str = data.get("client_id") or auth_code.client_id
+        publisher_id         = credentials.get("publisherId", "")
+        auth_code.delete()
+
+        # Upsert: return the existing valid token for this client+publisher so
+        # the AI client keeps the same stable token identity across re-authorisations.
+        existing = OAuthToken.objects.filter(
+            client_id=oauth_client_id,
+            expires_at__gt=timezone.now(),
+        ).filter(credentials__publisherId=publisher_id).first()
+
+        if existing:
+            remaining: int = int((existing.expires_at - timezone.now()).total_seconds())
+            # Backfill refresh_token for tokens created before the refresh_token migration.
+            if not existing.refresh_token:
+                existing.refresh_token = secrets.token_urlsafe(32)
+                existing.save(update_fields=["refresh_token"])
+            add_attrs([
+                ("auth.result", "success"),
+                ("auth.token_reused", True),
+                ("auth.publisher_id", publisher_id),
+                ("auth.client_id", oauth_client_id),
+            ])
+            logger.info(
+                "OAuth token reused (stable): publisher=%s client=%s expires_in=%ds",
+                publisher_id, oauth_client_id, remaining,
+            )
+            return JsonResponse({
+                "access_token": existing.token,
+                "token_type": "bearer",
+                "expires_in": remaining,
+                "refresh_token": existing.refresh_token,
+            })
+
+        token: str       = secrets.token_urlsafe(32)
+        new_refresh: str = secrets.token_urlsafe(32)
+        OAuthToken.objects.create(
+            token=token,
+            client_id=oauth_client_id,
+            refresh_token=new_refresh,
+            credentials=credentials,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+        add_attrs([
+            ("auth.result", "success"),
+            ("auth.token_reused", False),
+            ("auth.publisher_id", publisher_id),
+            ("auth.client_id", oauth_client_id),
+        ])
+        record_metric("Custom/Auth/token_issued_count", 1)
+        logger.info("OAuth token issued (new): publisher=%s client=%s", publisher_id, oauth_client_id)
+        return JsonResponse({
+            "access_token": token,
+            "token_type": "bearer",
+            "expires_in": 30 * 24 * 3600,
+            "refresh_token": new_refresh,
+        })
     except Exception as exc:
         notice_err(exc, [("error.layer", "auth")])
         logger.error("OAuth token: unhandled error", exc_info=True)
@@ -467,14 +452,14 @@ def auth_login(request: HttpRequest) -> JsonResponse:
 
             request.session["credentials"] = {
                 "publisherId": publisher_id,
-                "apiKey":      api_key,
-                "apiSecret":   api_secret,
+                "apiKey": api_key,
+                "apiSecret": api_secret,
             }
-            request.session["authenticatedAt"]   = datetime.now().isoformat()
+            request.session["authenticatedAt"] = datetime.now().isoformat()
             request.session["remember_for_days"] = remember_for_days
 
             if remember_for_days == 0:
-                request.session.set_expiry(0)
+                request.session.set_expiry(0)       # browser-session cookie
             else:
                 request.session.set_expiry(remember_for_days * 24 * 3600)
 
@@ -543,8 +528,8 @@ def auth_logout(request: HttpRequest) -> JsonResponse:
     publisher_id: str = (request.session.get("credentials") or {}).get("publisherId", "unknown")
     request.session.flush()
     add_attrs([
-        ("auth.flow",        "session"),
-        ("auth.result",      "success"),
+        ("auth.flow", "session"),
+        ("auth.result", "success"),
         ("auth.publisher_id", publisher_id),
     ])
     record_metric("Custom/Auth/session_logout_count", 1)

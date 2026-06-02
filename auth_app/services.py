@@ -1,5 +1,6 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
 # redirect-URI allowlisting, and CDS credential verification. No HTTP routing here.
+import base64
 import logging
 import time
 from typing import Optional
@@ -10,7 +11,6 @@ from django.conf import settings
 from django.http import HttpRequest, JsonResponse
 
 from mcp_app.nr_utils import add_attrs
-from mcp_app.utils import CDS_BASE_URL, make_basic_token
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,10 @@ def validate_cds_credentials(
     Raises requests.RequestException if the CDS is unreachable — callers must handle it.
     Records latency and HTTP status as New Relic custom attributes on the current transaction.
     """
-    token: str = make_basic_token(api_key, api_secret)
+    token: str = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     t0: float = time.perf_counter()
     resp = requests.get(
-        CDS_BASE_URL.format(publisher_id=publisher_id) + "/publisher-data/",
+        f"https://cds-beta.thepublive.com/publisher/{publisher_id}/publisher-data/",
         headers={"Authorization": f"Basic {token}"},
         timeout=10,
     )

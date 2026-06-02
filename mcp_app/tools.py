@@ -1,5 +1,4 @@
 import collections
-import contextlib
 import logging
 import threading
 
@@ -10,57 +9,10 @@ from .nr_utils import add_attrs, fn_trace, notice_err
 
 logger = logging.getLogger(__name__)
 
-# Per-tool concurrency tracking — how many calls to each tool are in-flight.
+# Per-tool concurrency tracking — how many calls to each tool are in-flight
+# across all concurrent requests.  Used for tool saturation alerting in NR.
 _active_tool_calls: dict[str, int] = collections.defaultdict(int)
 _active_tool_calls_lock = threading.Lock()
-
-
-# ── Concurrency context manager ───────────────────────────────────────────────
-
-@contextlib.contextmanager
-def _tool_active_calls(name: str):
-    """Track in-flight calls for a single tool and expose concurrency as an NR metric.
-
-    Previously the increment and decrement were inlined at the top and in the
-    finally block of call_tool, mixing concurrency bookkeeping with routing logic.
-    A context manager isolates both concerns and makes the pattern reusable.
-    """
-    with _active_tool_calls_lock:
-        _active_tool_calls[name] += 1
-        concurrency = _active_tool_calls[name]
-    try:
-        yield concurrency
-    finally:
-        with _active_tool_calls_lock:
-            _active_tool_calls[name] = max(0, _active_tool_calls[name] - 1)
-
-
-# ── Auth error handler ────────────────────────────────────────────────────────
-
-def _handle_cds_auth_error(name: str) -> dict:
-    """Return a structured auth_expired dict for CDS 401 responses.
-
-    Previously inlined in the except block of call_tool, mixing cross-cutting
-    auth error handling with the tool routing logic.
-    """
-    logger.warning(
-        "call_tool: CDS rejected credentials (HTTP 401): tool=%s — returning auth_expired", name
-    )
-    add_attrs([
-        ("mcp.tool_auth_error", True),
-        ("error.layer",         "tool"),
-        ("error.tool_name",     name),
-    ])
-    return {
-        "error": "auth_expired",
-        "message": (
-            "Your CDS credentials were rejected (HTTP 401). "
-            "Please re-authenticate: visit /connect or re-run the OAuth flow."
-        ),
-    }
-
-
-# ── Tool catalogue ────────────────────────────────────────────────────────────
 
 TOOLS = [
     {
@@ -313,233 +265,260 @@ TOOLS = [
 ]
 
 
-# ── Tool routing ──────────────────────────────────────────────────────────────
-
-def _route_tool(credentials, name, args):
-    """Pure tool routing — no concurrency tracking or cross-cutting error handling.
-
-    Extracted so that call_tool() owns only the lifecycle wrapper (concurrency,
-    NR attrs, 401 interception) while this function owns the routing logic.
-    """
-    if name == "list_posts":
-        with fn_trace("list_posts", group="Tool"):
-            page  = args.pop("page",  None)
-            limit = args.pop("limit", None)
-            try:
-                return cds_get(credentials, "/posts/", {"page": page, "limit": limit, **args})
-            except Exception as exc:
-                is_timeout = (
-                    isinstance(exc, __import__("requests").exceptions.Timeout)
-                    or getattr(getattr(exc, "response", None), "status_code", None) == 408
-                    or "408" in str(exc)
-                    or "timed out" in str(exc).lower()
-                )
-                if is_timeout:
-                    logger.warning("list_posts: upstream timeout after retries — returning structured error")
-                    return {
-                        "error": "upstream_timeout",
-                        "retry": True,
-                        "message": (
-                            "The CDS /posts/ endpoint timed out. "
-                            "Try narrowing your query: use a shorter date range, "
-                            "fewer filters, or a smaller page size."
-                        ),
-                    }
-                raise
-
-    if name == "get_post":
-        with fn_trace("get_post", group="Tool"):
-            return cds_get(credentials, f"/post/{args['identifier']}/")
-
-    if name == "get_post_by_url":
-        with fn_trace("get_post_by_url", group="Tool"):
-            legacy_url = args.get("legacy_url", "").strip()
-            if not legacy_url:
-                logger.warning("get_post_by_url: called with empty legacy_url")
-                return {
-                    "error": "invalid_input",
-                    "message": (
-                        "legacy_url is required and cannot be empty. "
-                        "Provide a non-empty relative URL path starting with /, "
-                        "e.g. /business/article-slug-12345."
-                    ),
-                }
-            return cds_get(credentials, "/post/", {"legacy_url": legacy_url})
-
-    if name == "list_categories":
-        with fn_trace("list_categories", group="Tool"):
-            return cds_get(credentials, "/categories/", {"page": args.get("page"), "limit": args.get("limit")})
-
-    if name == "get_category":
-        with fn_trace("get_category", group="Tool"):
-            return cds_get(credentials, f"/category/{args['identifier']}/")
-
-    if name == "list_tags":
-        with fn_trace("list_tags", group="Tool"):
-            return cds_get(credentials, "/tags/", {"page": args.get("page"), "limit": args.get("limit")})
-
-    if name == "get_tag":
-        with fn_trace("get_tag", group="Tool"):
-            return cds_get(credentials, f"/tag/{args['identifier']}/")
-
-    if name == "list_authors":
-        with fn_trace("list_authors", group="Tool"):
-            return cds_get(credentials, "/authors/", {"page": args.get("page"), "limit": args.get("limit")})
-
-    if name == "get_author":
-        with fn_trace("get_author", group="Tool"):
-            identifier = str(args.get("identifier", "")).strip()
-            if not identifier:
-                return {
-                    "error": "invalid_input",
-                    "message": "identifier is required. Use list_authors to find valid numeric author IDs.",
-                }
-            if not identifier.isdigit():
-                logger.warning("get_author: non-numeric identifier=%r", identifier)
-                return {
-                    "error": "invalid_input",
-                    "message": (
-                        f"Author identifier must be a numeric ID, got {identifier!r}. "
-                        "Use list_authors to discover valid author IDs."
-                    ),
-                }
-            try:
-                return cds_get(credentials, f"/author/{identifier}/")
-            except Exception as exc:
-                err_str     = str(exc).lower()
-                http_status = getattr(getattr(exc, "response", None), "status_code", None)
-                if http_status == 404 or "unknown endpoint" in err_str or "not found" in err_str:
-                    return {
-                        "error": "not_found",
-                        "message": (
-                            f"Author with ID {identifier} was not found. "
-                            "Use list_authors to discover valid author IDs."
-                        ),
-                    }
-                raise
-
-    if name == "get_publisher_data":
-        with fn_trace("get_publisher_data", group="Tool"):
-            try:
-                return cds_get(credentials, "/publisher-data/")
-            except Exception as exc:
-                err_str     = str(exc).lower()
-                http_status = getattr(getattr(exc, "response", None), "status_code", None)
-                is_endpoint_missing = (
-                    http_status in (400, 404)
-                    or "unknown endpoint" in err_str
-                    or "not found" in err_str
-                    or "http 404" in err_str
-                    or "http 400" in err_str
-                    or "no such" in err_str
-                )
-                if is_endpoint_missing:
-                    publisher_id = (credentials or {}).get("publisherId", "unknown")
-                    logger.warning(
-                        "get_publisher_data: /publisher-data/ unavailable for publisher=%s — falling back to /footer/",
-                        publisher_id,
-                    )
-                    add_attrs([
-                        ("mcp.tool_fallback",        "footer"),
-                        ("mcp.tool_fallback_reason", "endpoint_unavailable"),
-                    ])
-                    newrelic.agent.record_custom_metric("Custom/MCP/fallback_count", 1)
-                    return cds_get(credentials, "/footer/")
-                raise
-
-    if name == "identify_content":
-        with fn_trace("identify_content", group="Tool"):
-            return cds_get(credentials, "/identify_url/", {"legacy_url": args["legacy_url"]})
-
-    if name == "get_live_blog_updates":
-        with fn_trace("get_live_blog_updates", group="Tool"):
-            return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
-                "page":  args.get("page"),
-                "limit": args.get("limit"),
-            })
-
-    if name == "get_trending_posts":
-        with fn_trace("get_trending_posts", group="Tool"):
-            return cds_get(credentials, "/posts/trending/", {
-                "duration": args.get("duration"),
-                "limit":    args.get("limit"),
-                "page":     args.get("page"),
-                "type":     args.get("type__eq"),
-            })
-
-    if name == "get_navbar":
-        with fn_trace("get_navbar", group="Tool"):
-            return cds_get(credentials, "/navbar/")
-
-    if name == "get_footer":
-        with fn_trace("get_footer", group="Tool"):
-            return cds_get(credentials, "/footer/")
-
-    if name == "get_active_slots":
-        with fn_trace("get_active_slots", group="Tool"):
-            return cds_get(credentials, "/active-slots/")
-
-    if name == "get_newsletter_groups":
-        with fn_trace("get_newsletter_groups", group="Tool"):
-            try:
-                return cds_get(credentials, "/newsletter-groups/")
-            except Exception as exc:
-                err_str     = str(exc).lower()
-                http_status = getattr(getattr(exc, "response", None), "status_code", None)
-                is_not_configured = (
-                    http_status in (400, 404)
-                    or "newsletter" in err_str
-                    or "email" in err_str
-                    or "not configured" in err_str
-                    or "unknown endpoint" in err_str
-                )
-                if is_not_configured:
-                    publisher_id = (credentials or {}).get("publisherId", "unknown")
-                    logger.warning("get_newsletter_groups: publisher=%s has no newsletter configured", publisher_id)
-                    return {
-                        "error": "not_configured",
-                        "message": (
-                            "This publisher has no newsletter email configured. "
-                            "Newsletter groups are unavailable."
-                        ),
-                    }
-                raise
-
-    if name == "get_content_types":
-        with fn_trace("get_content_types", group="Tool"):
-            return cds_get(credentials, "/content-types/")
-
-    if name == "get_form_schema":
-        with fn_trace("get_form_schema", group="Tool"):
-            return cds_get(credentials, f"/form-schemas/{args['schema_id']}/", {
-                "page_source": args.get("page_source"),
-            })
-
-    logger.warning("call_tool: unknown tool requested: name=%s", name)
-    raise Exception(f"Unknown tool: {name}")
-
-
-# ── Public dispatcher ─────────────────────────────────────────────────────────
-
 @newrelic.agent.function_trace(name="call_tool", group="Tool")
 def call_tool(credentials, name, args):
-    """Lifecycle wrapper: concurrency tracking → routing → 401 interception."""
     add_attrs([("mcp.tool_name", name)])
     args = args or {}
     logger.debug("call_tool: tool=%s args_count=%d", name, len(args))
 
-    with _tool_active_calls(name) as concurrency:
-        add_attrs([("mcp.tool_concurrency", concurrency)])
-        newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/active_calls", concurrency)
-        try:
-            return _route_tool(credentials, name, args)
-        except Exception as exc:
-            http_status = getattr(getattr(exc, "response", None), "status_code", None)
-            if http_status == 401:
-                return _handle_cds_auth_error(name)
-            logger.error("call_tool error: tool=%s error=%s", name, exc, exc_info=True)
-            notice_err(exc, [
-                ("error.layer",    "tool"),
+    # Per-tool concurrency: increment before dispatch, decrement in finally.
+    # Captures how many concurrent executions of this specific tool are running.
+    with _active_tool_calls_lock:
+        _active_tool_calls[name] += 1
+        concurrency = _active_tool_calls[name]
+    add_attrs([("mcp.tool_concurrency", concurrency)])
+    newrelic.agent.record_custom_metric(f"Custom/Tool/{name}/active_calls", concurrency)
+
+    try:
+        if name == "list_posts":
+            with fn_trace("list_posts", group="Tool"):
+                page  = args.pop("page",  None)
+                limit = args.pop("limit", None)
+                try:
+                    return cds_get(credentials, "/posts/", {"page": page, "limit": limit, **args})
+                except Exception as exc:
+                    # Surface a structured, retryable error for timeout conditions so
+                    # the AI client can decide to retry rather than showing a raw traceback.
+                    is_timeout = (
+                        isinstance(exc, __import__("requests").exceptions.Timeout)
+                        or getattr(getattr(exc, "response", None), "status_code", None) == 408
+                        or "408" in str(exc)
+                        or "timed out" in str(exc).lower()
+                    )
+                    if is_timeout:
+                        logger.warning("list_posts: upstream timeout after retries — returning structured error")
+                        return {
+                            "error": "upstream_timeout",
+                            "retry": True,
+                            "message": (
+                                "The CDS /posts/ endpoint timed out. "
+                                "Try narrowing your query: use a shorter date range, "
+                                "fewer filters, or a smaller page size."
+                            ),
+                        }
+                    raise
+
+        if name == "get_post":
+            with fn_trace("get_post", group="Tool"):
+                return cds_get(credentials, f"/post/{args['identifier']}/")
+
+        if name == "get_post_by_url":
+            with fn_trace("get_post_by_url", group="Tool"):
+                legacy_url = args.get("legacy_url", "").strip()
+                if not legacy_url:
+                    logger.warning("get_post_by_url: called with empty legacy_url — returning input error")
+                    return {
+                        "error": "invalid_input",
+                        "message": (
+                            "legacy_url is required and cannot be empty. "
+                            "Provide a non-empty relative URL path starting with /, "
+                            "e.g. /business/article-slug-12345."
+                        ),
+                    }
+                return cds_get(credentials, "/post/", {"legacy_url": legacy_url})
+
+        if name == "list_categories":
+            with fn_trace("list_categories", group="Tool"):
+                return cds_get(credentials, "/categories/", {"page": args.get("page"), "limit": args.get("limit")})
+
+        if name == "get_category":
+            with fn_trace("get_category", group="Tool"):
+                return cds_get(credentials, f"/category/{args['identifier']}/")
+
+        if name == "list_tags":
+            with fn_trace("list_tags", group="Tool"):
+                return cds_get(credentials, "/tags/", {"page": args.get("page"), "limit": args.get("limit")})
+
+        if name == "get_tag":
+            with fn_trace("get_tag", group="Tool"):
+                return cds_get(credentials, f"/tag/{args['identifier']}/")
+
+        if name == "list_authors":
+            with fn_trace("list_authors", group="Tool"):
+                return cds_get(credentials, "/author/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
+
+        if name == "get_author":
+            with fn_trace("get_author", group="Tool"):
+                identifier = str(args.get("identifier", "")).strip()
+                if not identifier:
+                    return {
+                        "error": "invalid_input",
+                        "message": "identifier is required. Use list_authors to find valid numeric author IDs.",
+                    }
+                if not identifier.isdigit():
+                    logger.warning("get_author: non-numeric identifier=%r — returning input error", identifier)
+                    return {
+                        "error": "invalid_input",
+                        "message": (
+                            f"Author identifier must be a numeric ID, got {identifier!r}. "
+                            "Use list_authors to discover valid author IDs."
+                        ),
+                    }
+                try:
+                    return cds_get(credentials, f"/author/{identifier}/")
+                except Exception as exc:
+                    err_str = str(exc).lower()
+                    http_status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if http_status == 404 or "unknown endpoint" in err_str or "not found" in err_str:
+                        return {
+                            "error": "not_found",
+                            "message": (
+                                f"Author with ID {identifier} was not found. "
+                                "Use list_authors to discover valid author IDs."
+                            ),
+                        }
+                    raise
+
+        if name == "get_publisher_data":
+            with fn_trace("get_publisher_data", group="Tool"):
+                try:
+                    return cds_get(credentials, "/publisher-data/")
+                except Exception as exc:
+                    # CDS returns "Unknown Endpoint Path" for publishers where
+                    # /publisher-data/ is not configured. /footer/ carries the
+                    # same branding data (logo, colors, social links, app URLs).
+                    # Fall back silently so Claude gets the answer in one call.
+                    err_str = str(exc).lower()
+                    http_status = getattr(getattr(exc, "response", None), "status_code", None)
+                    is_endpoint_missing = (
+                        http_status in (400, 404)
+                        or "unknown endpoint" in err_str
+                        or "not found" in err_str
+                        or "http 404" in err_str
+                        or "http 400" in err_str
+                        or "no such" in err_str
+                    )
+                    if is_endpoint_missing:
+                        publisher_id = (credentials or {}).get("publisherId", "unknown")
+                        logger.warning(
+                            "get_publisher_data: /publisher-data/ unavailable for "
+                            "publisher=%s — falling back to /footer/",
+                            publisher_id,
+                        )
+                        add_attrs([
+                            ("mcp.tool_fallback", "footer"),
+                            ("mcp.tool_fallback_reason", "endpoint_unavailable"),
+                        ])
+                        newrelic.agent.record_custom_metric("Custom/MCP/fallback_count", 1)
+                        return cds_get(credentials, "/footer/")
+                    raise
+
+        if name == "identify_content":
+            with fn_trace("identify_content", group="Tool"):
+                return cds_get(credentials, "/identify_url/", {"legacy_url": args["legacy_url"]})
+
+        if name == "get_live_blog_updates":
+            with fn_trace("get_live_blog_updates", group="Tool"):
+                return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
+                    "page":  args.get("page"),
+                    "limit": args.get("limit"),
+                })
+
+        if name == "get_trending_posts":
+            with fn_trace("get_trending_posts", group="Tool"):
+                return cds_get(credentials, "/posts/trending/", {
+                    "duration": args.get("duration"),
+                    "limit":    args.get("limit"),
+                    "page":     args.get("page"),
+                    "type":     args.get("type__eq"),
+                })
+
+        if name == "get_navbar":
+            with fn_trace("get_navbar", group="Tool"):
+                return cds_get(credentials, "/navbar/")
+
+        if name == "get_footer":
+            with fn_trace("get_footer", group="Tool"):
+                return cds_get(credentials, "/footer/")
+
+        if name == "get_active_slots":
+            with fn_trace("get_active_slots", group="Tool"):
+                return cds_get(credentials, "/active-slots/")
+
+        if name == "get_newsletter_groups":
+            with fn_trace("get_newsletter_groups", group="Tool"):
+                try:
+                    return cds_get(credentials, "/newsletter-groups/")
+                except Exception as exc:
+                    err_str = str(exc).lower()
+                    http_status = getattr(getattr(exc, "response", None), "status_code", None)
+                    # CDS returns an error (typically 400 or a detail message about missing
+                    # newsletter email) when the publisher has no newsletter configured.
+                    is_not_configured = (
+                        http_status in (400, 404)
+                        or "newsletter" in err_str
+                        or "email" in err_str
+                        or "not configured" in err_str
+                        or "unknown endpoint" in err_str
+                    )
+                    if is_not_configured:
+                        publisher_id = (credentials or {}).get("publisherId", "unknown")
+                        logger.warning(
+                            "get_newsletter_groups: publisher=%s has no newsletter configured", publisher_id
+                        )
+                        return {
+                            "error": "not_configured",
+                            "message": (
+                                "This publisher has no newsletter email configured. "
+                                "Newsletter groups are unavailable."
+                            ),
+                        }
+                    raise
+
+        if name == "get_content_types":
+            with fn_trace("get_content_types", group="Tool"):
+                return cds_get(credentials, "/content-types/")
+
+        if name == "get_form_schema":
+            with fn_trace("get_form_schema", group="Tool"):
+                return cds_get(credentials, f"/form-schemas/{args['schema_id']}/", {
+                    "page_source": args.get("page_source"),
+                })
+
+        logger.warning("call_tool: unknown tool requested: name=%s", name)
+        raise Exception(f"Unknown tool: {name}")
+    except Exception as exc:
+        # CDS returned 401 — credentials stored in the session are invalid or
+        # expired.  Return a structured, human-readable error as tool content
+        # instead of propagating a raw exception so the AI client can surface a
+        # clear re-authentication message rather than an opaque traceback.
+        http_status = getattr(getattr(exc, "response", None), "status_code", None)
+        if http_status == 401:
+            logger.warning(
+                "call_tool: CDS rejected credentials (HTTP 401): tool=%s — returning auth_expired",
+                name,
+            )
+            add_attrs([
+                ("mcp.tool_auth_error", True),
+                ("error.layer", "tool"),
                 ("error.tool_name", name),
             ])
-            raise
+            return {
+                "error": "auth_expired",
+                "message": (
+                    "Your CDS credentials were rejected (HTTP 401). "
+                    "Please re-authenticate: visit /connect or re-run the OAuth flow."
+                ),
+            }
+        logger.error("call_tool error: tool=%s error=%s", name, exc, exc_info=True)
+        notice_err(exc, [
+            ("error.layer", "tool"),
+            ("error.tool_name", name),
+        ])
+        raise
+    finally:
+        with _active_tool_calls_lock:
+            _active_tool_calls[name] = max(0, _active_tool_calls[name] - 1)
