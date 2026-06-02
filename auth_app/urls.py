@@ -11,7 +11,9 @@ urlpatterns = [
     path(".well-known/openid-configuration", views.oauth_server_metadata, name="openid-configuration"),
     # OAuth 2.0 PKCE flow
     path("register", views.oauth_register, name="oauth-register"),
+    path("authorize", views.oauth_authorize, name="oauth-authorize-root"),
     path("oauth/authorize", views.oauth_authorize, name="oauth-authorize"),
+    path("token", views.oauth_token, name="oauth-token-root"),
     path("oauth/token", views.oauth_token, name="oauth-token"),
     # Session-based auth (browser users)
     path("connect", views.connect, name="connect"),

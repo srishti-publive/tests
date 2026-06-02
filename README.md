@@ -6,6 +6,14 @@ A Django server that exposes Publive's Content Delivery (CDS) and Content Manage
 
 The Publive MCP Server bridges AI clients (Claude Desktop, Cursor, custom agents) and Publive's publishing platform. It implements the Model Context Protocol (MCP) so that an AI can read published content, manage drafts, create posts, and manipulate media entirely through natural language. Non-technical users connect via the Claude Desktop OAuth flow; developers connect with a Bearer token and their Publive API credentials (`publisherId`, `apiKey`, `apiSecret`).
 
+### Architecture documentation
+
+Formal design docs and draw.io diagrams live under [`docs/`](docs/):
+
+- [HLD.md](docs/HLD.md) — high-level design
+- [LLD.md](docs/LLD.md) — low-level design
+- [docs/diagrams/](docs/diagrams/) — OAuth flow, SSE lifecycle, CMS safety tiers (`.drawio`)
+
 ## Authentication
 
 ### OAuth 2.0 + PKCE (for desktop clients)

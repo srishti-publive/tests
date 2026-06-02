@@ -49,8 +49,8 @@ def oauth_server_metadata(request: HttpRequest) -> JsonResponse:
     base_url = settings.BASE_URL.rstrip("/")
     return JsonResponse({
         "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token",
+        "authorization_endpoint": f"{base_url}/authorize",
+        "token_endpoint": f"{base_url}/token",
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
