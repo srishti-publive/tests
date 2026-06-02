@@ -40,7 +40,7 @@ def oauth_protected_resource(request: HttpRequest, resource_path: str = "") -> J
     base_url = settings.BASE_URL.rstrip("/")
     return JsonResponse({
         "resource": f"{base_url}/mcp",
-        "authorization_servers": [f"{base_url}/.well-known/oauth-authorization-server"],
+        "authorization_servers": [base_url],
     })
 
 
