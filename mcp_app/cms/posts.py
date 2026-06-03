@@ -201,7 +201,13 @@ def create_post(credentials: dict, args: dict):
     if dry_run:
         return {"dry_run": True, "preview": preview_create_op("Post", payload)}
 
-    result = cms_post(credentials, "/post/", payload)
+    # CMS API does not support creating a post directly in non-Draft status (returns HTTP 500).
+    # Two-step: POST as Draft, then PATCH to the intended status.
+    intended_status = payload["status"]
+    draft_payload = {**payload, "status": "Draft"}
+
+    result = cms_post(credentials, "/post/", draft_payload)
+
     if (
         isinstance(result, dict)
         and result.get("error_type") == "bad_request"
@@ -216,15 +222,37 @@ def create_post(credentials: dict, args: dict):
                 "Gallery posts require gallery image data in the 'content' or 'custom_entity' field. "
                 "Create the post via the Publive dashboard first, then update other fields via cms_update_post."
             ),
-            "Article": (
-                "Article post creation is not currently supported via the API (server-side limitation). "
-                "Use LiveBlog, CustomPage, or BlankPage instead, or create the post via the Publive dashboard."
-            ),
         }
         hint = type_hints.get(post_type)
         if hint:
             return {"error_type": "bad_request", "message": hint, "retryable": False}
-    return result
+
+    if isinstance(result, dict) and "error_type" in result:
+        return result
+
+    data = result.get("data", result) if isinstance(result, dict) else result
+    post_id = data.get("id") if isinstance(data, dict) else None
+    if not post_id:
+        return result
+
+    patch = {"status": intended_status}
+    if intended_status == "Scheduled" and payload.get("scheduled_at"):
+        patch["scheduled_at"] = payload["scheduled_at"]
+
+    patch_result = cms_patch(credentials, f"/post/{post_id}/", patch)
+    if isinstance(patch_result, dict) and "error_type" in patch_result:
+        return {
+            "error_type": "partial_success",
+            "message": (
+                f"Post was created as Draft (ID: {post_id}) but setting status to "
+                f"{intended_status} failed: {patch_result.get('message', 'unknown error')}. "
+                "Use cms_update_post to retry the status change."
+            ),
+            "post_id": post_id,
+            "retryable": False,
+        }
+
+    return patch_result
 
 
 def update_post(credentials: dict, args: dict):
