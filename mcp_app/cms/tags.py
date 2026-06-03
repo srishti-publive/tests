@@ -3,10 +3,10 @@ from .helpers import DELETION_REQUIRES_CONFIRMATION, preview_create_op, preview_
 
 SCHEMAS = [
     {
-        "name": "cms_list_tags",
+        "name": "list_editorial_tags",
         "description": (
             "List all CMS tags with pagination. Returns all tags including unpublished ones. "
-            "NOTE: if the user only needs published tags, prefer the CDS list_tags tool. "
+            "NOTE: if the user only needs published tags, prefer the CDS fetch_published_tags tool. "
             "Returns results directly — no confirmation step needed."
         ),
         "inputSchema": {
@@ -18,10 +18,10 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_tag",
+        "name": "get_editorial_tag",
         "description": (
             "Retrieve a single CMS tag by ID. Returns full management details. "
-            "NOTE: if the user only needs basic published data, prefer the CDS get_tag tool. "
+            "NOTE: if the user only needs basic published data, prefer the CDS fetch_published_tag tool. "
             "Returns results directly — no confirmation step needed."
         ),
         "inputSchema": {
@@ -31,7 +31,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_tag",
+        "name": "create_tag",
         "description": (
             "Create a new tag in the CMS. "
             "BEFORE calling: confirm all details with the user — at minimum name and english_name. "
@@ -54,7 +54,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_tag",
+        "name": "update_tag",
         "description": (
             "Update an existing tag. "
             "Workflow: dry_run=true (default) fetches current state and shows a diff — no changes made. "
@@ -75,7 +75,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_tag",
+        "name": "delete_tag",
         "description": (
             "Permanently delete a tag. This action CANNOT be undone. "
             "Workflow: dry_run=true (default) shows full tag details — no deletion. "
@@ -94,11 +94,11 @@ SCHEMAS = [
 ]
 
 
-def list_tags(credentials: dict, args: dict):
+def list_editorial_tags(credentials: dict, args: dict):
     return cms_get(credentials, "/tag/", {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_tag(credentials: dict, args: dict):
+def get_editorial_tag(credentials: dict, args: dict):
     return cms_get(credentials, f"/tag/{args['id']}/")
 
 
@@ -137,9 +137,9 @@ def delete_tag(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_tags":   list_tags,
-    "cms_get_tag":     get_tag,
-    "cms_create_tag":  create_tag,
-    "cms_update_tag":  update_tag,
-    "cms_delete_tag":  delete_tag,
+    "list_editorial_tags": list_editorial_tags,
+    "get_editorial_tag":   get_editorial_tag,
+    "create_tag":          create_tag,
+    "update_tag":          update_tag,
+    "delete_tag":          delete_tag,
 }

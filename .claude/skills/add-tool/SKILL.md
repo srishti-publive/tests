@@ -18,27 +18,27 @@ Tools are **fully data-driven**. No changes to `views.py`, `protocol/`, or `tran
 
 ```
 mcp_app/
-  cds/                     ← read-only CDS tools (public content)
-    posts.py               ← list_posts, get_post, get_post_by_url …
-    categories.py          ← list_categories, get_category
-    tags.py                ← list_tags, get_tag
-    authors.py             ← list_authors, get_author
-    publisher.py           ← get_publisher_data, get_navbar, get_footer …
-    content.py             ← identify_content, get_active_slots …
-    sitemaps.py            ← get_sitemap_* (6 tools)
-    static_files.py        ← get_static_* (4 tools)
+  cds/                     ← read-only delivery tools (public content)
+    posts.py               ← fetch_published_posts, fetch_published_post, fetch_post_by_url …
+    categories.py          ← fetch_published_categories, fetch_published_category
+    tags.py                ← fetch_published_tags, fetch_published_tag
+    authors.py             ← fetch_authors, fetch_author
+    publisher.py           ← fetch_publisher_profile, fetch_site_navigation, fetch_site_footer …
+    content.py             ← resolve_url_to_content_type, fetch_ad_slots …
+    sitemaps.py            ← fetch_sitemap_* (6 tools)
+    static_files.py        ← fetch_ads_txt, fetch_robots_txt, fetch_push_notification_html …
     __init__.py            ← assembles TOOLS list + dispatch_cds_tool()
   cms/
     helpers.py             ← preview_create_op, preview_update_op,
                               preview_delete_op, DELETION_REQUIRES_CONFIRMATION
-    categories.py          ← cms_list/get/create/update/delete_category
-    tags.py                ← cms_list/get/create/update/delete_tag
-    posts.py               ← cms_list/get/create/update/delete_post
-    live_blog.py           ← cms_*_live_blog_update
-    media.py               ← cms_*_media
-    custom_components.py   ← cms_*_custom_component
-    custom_content_types.py← cms_*_custom_content_type
-    validators.py          ← validate_media_exists, validate_category_exists …
+    categories.py          ← list/get/create/update/delete_editorial_category
+    tags.py                ← list/get/create/update/delete_editorial_tag
+    posts.py               ← list/get/create/update/delete_editorial_post
+    live_blog.py           ← list_editorial_liveblog_updates, add/update/delete_liveblog_update
+    media.py               ← list/get/register/update/delete_media_asset
+    custom_components.py   ← list/get/create/update/delete_component_schema
+    custom_content_types.py← list/get/create/update/delete_content_type_schema
+    validators.py          ← validate_media_asset, validate_category, validate_author …
     forms.py               ← submit_form
     __init__.py            ← assembles CMS_TOOLS + CMS_TOOL_NAMES + dispatch_cms_tool()
   clients/
@@ -77,10 +77,10 @@ Domain file?
 
 | Tool type | Convention | Examples |
 |---|---|---|
-| CDS read | `verb_noun` | `list_posts`, `get_author`, `get_trending_posts` |
-| CMS list/get | `cms_verb_noun` | `cms_list_categories`, `cms_get_post` |
-| CMS create/update/delete | `cms_verb_noun` | `cms_create_category`, `cms_delete_tag` |
-| Validation (pre-flight, no side effects) | `validate_noun_verb` | `validate_media_exists`, `validate_post_slug` |
+| Delivery (CDS read) | `fetch_noun` / `resolve_verb` | `fetch_published_posts`, `fetch_author`, `fetch_trending_posts` |
+| Editorial list/get | `list_editorial_noun` / `get_editorial_noun` | `list_editorial_categories`, `get_editorial_post` |
+| Editorial create/update/delete | `verb_noun` | `create_category`, `update_post`, `delete_tag` |
+| Validation (pre-flight, no side effects) | `validate_noun` | `validate_media_asset`, `validate_post_slug` |
 | Form submission | `submit_noun` | `submit_form` |
 
 ---
@@ -244,12 +244,12 @@ At the bottom of the domain file, add the function to the `HANDLERS` dict:
 ```python
 HANDLERS = {
     # ... existing entries ...
-    "cms_list_widgets":       list_widgets,
-    "cms_get_widget":         get_widget,
-    "cms_create_widget":      create_widget,
-    "cms_update_widget":      update_widget,
-    "cms_delete_widget":      delete_widget,
-    "validate_widget_exists": validate_widget_exists,
+    "list_widgets":           list_widgets,
+    "get_widget":             get_widget,
+    "create_widget":           create_widget,
+    "update_widget":           update_widget,
+    "delete_widget":          delete_widget,
+    "validate_widget":        validate_widget_exists,
 }
 ```
 
@@ -368,7 +368,7 @@ from ..clients.cms import cms_get
    return {"error": "invalid_input", "message": "widget_id must be a positive integer."}
    ```
 
-4. **For create tools with special API constraints** (e.g. `cms_create_post` requires contributors), validate before the dry_run branch and return a `missing_required_field` error.
+4. **For create tools with special API constraints** (e.g. `create_post` requires contributors), validate before the dry_run branch and return a `missing_required_field` error.
 
 ---
 

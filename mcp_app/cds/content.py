@@ -3,7 +3,7 @@ from ..clients.cds import cds_get
 
 SCHEMAS = [
     {
-        "name": "identify_content",
+        "name": "resolve_url_to_content_type",
         "description": "Resolve a URL path to its content type: post, category, tag, author, redirect, or not_found.",
         "inputSchema": {
             "type": "object",
@@ -14,17 +14,17 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_active_slots",
+        "name": "fetch_ad_slots",
         "description": "Get configured advertisement slots with dimensions, HTML content, and slot type information.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "get_content_types",
+        "name": "fetch_content_type_definitions",
         "description": "Get all content types configured for this publication (e.g. Article, Video, Web Story) with their API and collection slugs.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "get_form_schema",
+        "name": "fetch_form_schema",
         "description": "Get a form schema by ID, including field definitions, validation rules, field groups, and captcha configuration.",
         "inputSchema": {
             "type": "object",
@@ -38,25 +38,25 @@ SCHEMAS = [
 ]
 
 
-def identify_content(credentials: dict, args: dict):
+def resolve_url_to_content_type(credentials: dict, args: dict):
     return cds_get(credentials, "/identify_url/", {"legacy_url": args["legacy_url"]})
 
 
-def get_active_slots(credentials: dict, args: dict):
+def fetch_ad_slots(credentials: dict, args: dict):
     return cds_get(credentials, "/active-slots/")
 
 
-def get_content_types(credentials: dict, args: dict):
+def fetch_content_type_definitions(credentials: dict, args: dict):
     return cds_get(credentials, "/content-types/")
 
 
-def get_form_schema(credentials: dict, args: dict):
+def fetch_form_schema(credentials: dict, args: dict):
     return cds_get(credentials, f"/form-schemas/{args['schema_id']}/", {"page_source": args.get("page_source")})
 
 
 HANDLERS = {
-    "identify_content": identify_content,
-    "get_active_slots": get_active_slots,
-    "get_content_types": get_content_types,
-    "get_form_schema":  get_form_schema,
+    "resolve_url_to_content_type":  resolve_url_to_content_type,
+    "fetch_ad_slots":               fetch_ad_slots,
+    "fetch_content_type_definitions": fetch_content_type_definitions,
+    "fetch_form_schema":            fetch_form_schema,
 }

@@ -5,7 +5,7 @@ _BASE = "/entities/content-type/"
 
 SCHEMAS = [
     {
-        "name": "cms_list_custom_content_types",
+        "name": "list_content_type_schemas",
         "description": (
             "List all custom content type schemas defined for this publisher. "
             "Returns results directly — no confirmation step needed."
@@ -19,7 +19,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_custom_content_type",
+        "name": "get_content_type_schema",
         "description": (
             "Retrieve a single custom content type schema by ID. "
             "Returns results directly — no confirmation step needed."
@@ -31,7 +31,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_custom_content_type",
+        "name": "create_content_type_schema",
         "description": (
             "Create a new custom content type schema. "
             "Immutable after creation: api_slug, api_collections_slug. "
@@ -57,7 +57,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_custom_content_type",
+        "name": "update_content_type_schema",
         "description": (
             "Update an existing custom content type schema. "
             "Immutable fields: api_slug, api_collections_slug. "
@@ -78,7 +78,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_custom_content_type",
+        "name": "delete_content_type_schema",
         "description": (
             "Permanently delete a custom content type schema. This action CANNOT be undone. "
             "All content entries based on this schema will lose their schema reference. "
@@ -98,15 +98,15 @@ SCHEMAS = [
 ]
 
 
-def list_custom_content_types(credentials: dict, args: dict):
+def list_content_type_schemas(credentials: dict, args: dict):
     return cms_get(credentials, _BASE, {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_custom_content_type(credentials: dict, args: dict):
+def get_content_type_schema(credentials: dict, args: dict):
     return cms_get(credentials, f"{_BASE}{args['id']}/")
 
 
-def create_custom_content_type(credentials: dict, args: dict):
+def create_content_type_schema(credentials: dict, args: dict):
     dry_run = args.get("dry_run", True)
     payload = {k: v for k, v in args.items() if k != "dry_run"}
     if dry_run:
@@ -114,7 +114,7 @@ def create_custom_content_type(credentials: dict, args: dict):
     return cms_post(credentials, _BASE, payload)
 
 
-def update_custom_content_type(credentials: dict, args: dict):
+def update_content_type_schema(credentials: dict, args: dict):
     dry_run = args.get("dry_run", True)
     type_id = args["id"]
     changes = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
@@ -126,7 +126,7 @@ def update_custom_content_type(credentials: dict, args: dict):
     return cms_patch(credentials, f"{_BASE}{type_id}/", changes)
 
 
-def delete_custom_content_type(credentials: dict, args: dict):
+def delete_content_type_schema(credentials: dict, args: dict):
     dry_run        = args.get("dry_run", True)
     confirm_delete = args.get("confirm_delete", False)
     type_id        = args["id"]
@@ -144,9 +144,9 @@ def delete_custom_content_type(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_custom_content_types":   list_custom_content_types,
-    "cms_get_custom_content_type":     get_custom_content_type,
-    "cms_create_custom_content_type":  create_custom_content_type,
-    "cms_update_custom_content_type":  update_custom_content_type,
-    "cms_delete_custom_content_type":  delete_custom_content_type,
+    "list_content_type_schemas":   list_content_type_schemas,
+    "get_content_type_schema":     get_content_type_schema,
+    "create_content_type_schema":  create_content_type_schema,
+    "update_content_type_schema":  update_content_type_schema,
+    "delete_content_type_schema":  delete_content_type_schema,
 }

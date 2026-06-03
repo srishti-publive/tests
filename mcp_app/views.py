@@ -44,10 +44,13 @@ def mcp_endpoint(request):
         request.META.get("HTTP_USER_AGENT", "unknown")[:80],
     )
 
-    credentials, token_expires_at = resolve_credentials(request)
-    if not credentials:
-        logger.warning("MCP authentication failed: method=%s has_bearer=%s", request.method, has_bearer)
-        return build_unauthorized_response(request)
+    credentials, token_expires_at, error_code = resolve_credentials(request)
+    if error_code or not credentials:
+        logger.warning(
+            "MCP authentication failed: method=%s has_bearer=%s error_code=%s",
+            request.method, has_bearer, error_code,
+        )
+        return build_unauthorized_response(request, error_code=error_code)
 
     logger.info("MCP authenticated: method=%s", request.method)
 

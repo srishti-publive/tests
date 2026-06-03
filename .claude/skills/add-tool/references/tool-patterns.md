@@ -34,7 +34,7 @@ SCHEMAS = [
         "name": "list_widgets",
         "description": (
             "List all published widgets with pagination and optional status filter. "
-            "If the user needs unpublished widgets, use cms_list_widgets instead."
+            "If the user needs unpublished widgets, use list_editorial_widgets instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -111,7 +111,7 @@ HANDLERS = {
 Use when the API only accepts integer IDs (not slugs).
 
 ```python
-def get_author_by_id(credentials: dict, args: dict):
+def fetch_author_by_id(credentials: dict, args: dict):
     identifier = str(args.get("identifier", "")).strip()
     if not identifier:
         return {"error": "invalid_input", "message": "identifier is required."}
@@ -120,7 +120,7 @@ def get_author_by_id(credentials: dict, args: dict):
             "error": "invalid_input",
             "message": (
                 f"identifier must be a numeric ID, got {identifier!r}. "
-                "Use list_authors to discover valid IDs."
+                "Use fetch_authors to discover valid IDs."
             ),
         }
     return cds_get(credentials, f"/author/{identifier}/")
@@ -136,7 +136,7 @@ Use when the primary endpoint is not available for all publishers.
 import newrelic.agent
 from ..nr_utils import add_attrs
 
-def get_publisher_data(credentials: dict, args: dict):
+def fetch_publisher_profile(credentials: dict, args: dict):
     try:
         return cds_get(credentials, "/publisher-data/")
     except Exception as exc:
@@ -165,7 +165,7 @@ from .helpers import DELETION_REQUIRES_CONFIRMATION, preview_create_op, preview_
 
 SCHEMAS = [
     {
-        "name": "cms_list_widgets",
+        "name": "list_editorial_widgets",
         "description": (
             "List all CMS widgets with pagination. Returns every widget including unpublished ones. "
             "If the user only needs published widgets, prefer the CDS list_widgets tool. "
@@ -180,7 +180,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_widget",
+        "name": "get_editorial_widget",
         "description": (
             "Retrieve a single CMS widget by ID. Returns full management details including unpublished fields. "
             "If the user only needs basic published data, prefer the CDS get_widget tool. "
@@ -213,7 +213,7 @@ def get_widget(credentials: dict, args: dict):
 ```python
 SCHEMAS = [
     {
-        "name": "cms_create_widget",
+        "name": "create_widget",
         "description": (
             "Create a new widget in the CMS. "
             "BEFORE calling: confirm all details with the user — at minimum name and english_name. "
@@ -252,7 +252,7 @@ def create_widget(credentials: dict, args: dict):
 ```python
 SCHEMAS = [
     {
-        "name": "cms_update_widget",
+        "name": "update_widget",
         "description": (
             "Update an existing widget. "
             "BEFORE calling: confirm the widget ID and all fields to change with the user. "
@@ -294,7 +294,7 @@ def update_widget(credentials: dict, args: dict):
 ```python
 SCHEMAS = [
     {
-        "name": "cms_delete_widget",
+        "name": "delete_widget",
         "description": (
             "Permanently delete a widget. This action CANNOT be undone. "
             "Posts referencing this widget will lose their widget association. "
@@ -341,11 +341,11 @@ def delete_widget(credentials: dict, args: dict):
 HANDLERS = {
     "list_widgets":           list_widgets,
     "get_widget":             get_widget,
-    "cms_list_widgets":       list_widgets,        # if CMS version differs
-    "cms_get_widget":         get_widget,
-    "cms_create_widget":      create_widget,
-    "cms_update_widget":      update_widget,
-    "cms_delete_widget":      delete_widget,
+    "list_editorial_widgets":  list_widgets,        # if CMS version differs
+    "get_editorial_widget":    get_widget,
+    "create_widget":           create_widget,
+    "update_widget":           update_widget,
+    "delete_widget":           delete_widget,
     "validate_widget_exists": validate_widget_exists,
 }
 ```
@@ -383,7 +383,7 @@ def validate_widget_exists(credentials: dict, args: dict):
 
 ---
 
-## Special pattern — publish gate (cms_update_post style)
+## Special pattern — publish gate (update_post style)
 
 When setting `status=Published` requires an extra explicit confirmation:
 
@@ -423,7 +423,7 @@ Add `"confirm_publish"` to the inputSchema too:
 
 ---
 
-## Special pattern — integer field coercion (cms_create_post style)
+## Special pattern — integer field coercion (create_post style)
 
 When AI clients may send integer fields as strings (e.g. `"156228"` instead of `156228`):
 
@@ -447,7 +447,7 @@ def create_widget(credentials: dict, args: dict):
 
 ---
 
-## Special pattern — upstream 500 idempotency check (cms_create_custom_component style)
+## Special pattern — upstream 500 idempotency check (create_component_schema style)
 
 When the API sometimes 500s after actually committing the write, check before retrying:
 

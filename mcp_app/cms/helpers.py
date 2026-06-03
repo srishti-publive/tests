@@ -33,7 +33,7 @@ def preview_create_op(resource: str, payload: dict) -> str:
     lines += [
         "",
         "⚡  No changes have been made.",
-        f"To proceed, call cms_create_{resource.lower().replace(' ', '_')} again with dry_run=false.",
+        "To proceed, call this tool again with dry_run=false.",
     ]
     return "\n".join(lines)
 

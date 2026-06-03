@@ -7,10 +7,10 @@ logger = logging.getLogger(__name__)
 
 SCHEMAS = [
     {
-        "name": "cms_list_posts",
+        "name": "list_editorial_posts",
         "description": (
             "List all CMS posts with pagination. Includes drafts, published, and scheduled posts. "
-            "NOTE: if the user only needs published posts, prefer the CDS list_posts tool. "
+            "NOTE: if the user only needs published posts, prefer the CDS fetch_published_posts tool. "
             "Returns results directly — no confirmation step needed."
         ),
         "inputSchema": {
@@ -22,10 +22,10 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_post",
+        "name": "get_editorial_post",
         "description": (
             "Retrieve a single CMS post by ID. Returns full details including draft and scheduled content. "
-            "NOTE: if the user only needs basic published data, prefer the CDS get_post tool. "
+            "NOTE: if the user only needs basic published data, prefer the CDS fetch_published_post tool. "
             "Returns results directly — no confirmation step needed."
         ),
         "inputSchema": {
@@ -35,18 +35,18 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_post",
+        "name": "create_post",
         "description": (
             "Create a new post in the CMS. "
             "BEFORE calling: you MUST have all six required fields — title, english_title, type, status, "
             "primary_category, AND contributors (at least one author ID). "
             "contributors is REQUIRED by the API — omitting it causes a hard validation failure. "
-            "If the user has not provided an author ID, call list_authors first to get one, then ask the user to confirm. "
+            "If the user has not provided an author ID, call fetch_authors first to get one, then ask the user to confirm. "
             "english_title must be plain English text matching the title, NOT a pre-slugified string. "
             "TYPE-SPECIFIC REQUIREMENTS — do NOT attempt to create these without the noted fields: "
-            "Video: requires meta_data with meta_video_url and meta_video_embed. "
-            "Web Story: requires AMP story slide markup in the content field. "
-            "Gallery: requires gallery image data in content or custom_entity. "
+            "Video: requires meta_video_url (video page URL) and meta_video_embed (iframe embed code). "
+            "Web Story: requires AMP story slide markup in the content field AND meta_landscape_thumbnail (media ID). "
+            "Gallery: requires gallery image data in content or custom_entity, and after_para (integer, default 0). "
             "Article, LiveBlog, CustomPage, BlankPage: no extra required fields beyond the six standard ones. "
             "DRAFT posts (status=Draft): created immediately — no preview step. "
             "PUBLISHED/SCHEDULED/APPROVAL PENDING posts: dry_run=true (default) shows a full preview. "
@@ -73,13 +73,18 @@ SCHEMAS = [
                 "slug":                {"type": "string",  "description": "Custom URL slug (auto-generated from english_title if omitted). Immutable after creation."},
                 "scheduled_at":        {"type": "string",  "description": "Future publish date ISO 8601 — status must be Scheduled"},
                 "hide_banner_image":   {"type": "boolean", "description": "Hide the featured image on the post"},
-                "custom_published_at": {"type": "string",  "description": "Backdated publish timestamp ISO 8601. Immutable after creation."},
-                "dry_run":             {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
+                "custom_published_at":      {"type": "string",  "description": "Backdated publish timestamp ISO 8601. Immutable after creation."},
+                "meta_video_url":           {"type": "string",  "description": "Video post only — URL of the video page (e.g. YouTube/Vimeo URL). Merged into meta_data. Immutable after creation."},
+                "meta_video_embed":         {"type": "string",  "description": "Video post only — iframe embed code for the video. Merged into meta_data. Immutable after creation."},
+                "meta_landscape_thumbnail": {"type": "integer", "description": "Web Story only — media ID for the landscape thumbnail. Merged into meta_data. Immutable after creation."},
+                "after_para":              {"type": "integer", "description": "Gallery/Article — paragraph position for injecting content (default 0)."},
+                "meta_data":               {"type": "object",  "description": "Arbitrary key-value metadata (e.g. access_type). Merged with any type-specific meta fields above. Immutable after creation."},
+                "dry_run":                 {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
             },
         },
     },
     {
-        "name": "cms_update_post",
+        "name": "update_post",
         "description": (
             "Update an existing post. "
             "SETTING STATUS TO DRAFT: updates immediately — no dry_run step needed. "
@@ -110,7 +115,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_post",
+        "name": "delete_post",
         "description": (
             "Permanently delete a post and all its associated data. This action CANNOT be undone. "
             "Workflow: dry_run=true (default) shows full post details — no deletion. "
@@ -144,11 +149,11 @@ def _strip_list_brackets(payload: dict) -> None:
             payload[field] = payload[field].strip("[]")
 
 
-def list_posts(credentials: dict, args: dict):
+def list_editorial_posts(credentials: dict, args: dict):
     return cms_get(credentials, "/post/", {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_post(credentials: dict, args: dict):
+def get_editorial_post(credentials: dict, args: dict):
     return cms_get(credentials, f"/post/{args['id']}/")
 
 
@@ -161,20 +166,49 @@ def create_post(credentials: dict, args: dict):
             "error_type": "missing_required_field",
             "message": (
                 "contributors is required to create a post. "
-                "Call list_authors to find valid author IDs, then include "
+                "Call fetch_authors to find valid author IDs, then include "
                 "contributors as a comma-separated string (e.g. '12' or '12,15')."
             ),
             "retryable": False,
         }
 
+    # Merge type-specific helper fields into meta_data before any validation.
+    _META_HELPER_FIELDS = ("meta_video_url", "meta_video_embed", "meta_landscape_thumbnail")
+    meta_extras = {f: payload.pop(f) for f in _META_HELPER_FIELDS if f in payload}
+    if meta_extras:
+        existing_meta = payload.get("meta_data") or {}
+        payload["meta_data"] = {**existing_meta, **meta_extras}
+
     post_type = payload.get("type", "")
+    if post_type == "Video":
+        meta = payload.get("meta_data") or {}
+        if not meta.get("meta_video_url") or not meta.get("meta_video_embed"):
+            return {
+                "error_type": "missing_required_field",
+                "message": (
+                    "Video posts require meta_video_url (video page URL) and meta_video_embed (iframe embed code). "
+                    "Pass them as top-level parameters — they will be stored in meta_data."
+                ),
+                "retryable": False,
+            }
+
     if post_type == "Web Story" and not payload.get("content") and not payload.get("custom_entity"):
         return {
             "error_type": "missing_required_field",
             "message": (
-                "Web Story posts require AMP story slide content in the 'content' field. "
+                "Web Story posts require AMP story slide content in the 'content' field "
+                "and meta_landscape_thumbnail (a media ID). "
                 "Create an empty Web Story draft via the Publive dashboard first, "
-                "then use cms_update_post to update other fields programmatically."
+                "then use update_post to update other fields programmatically."
+            ),
+            "retryable": False,
+        }
+    if post_type == "Web Story" and not (payload.get("meta_data") or {}).get("meta_landscape_thumbnail"):
+        return {
+            "error_type": "missing_required_field",
+            "message": (
+                "Web Story posts require meta_landscape_thumbnail (a Publive media ID). "
+                "Pass it as a top-level parameter — it will be stored in meta_data."
             ),
             "retryable": False,
         }
@@ -184,7 +218,7 @@ def create_post(credentials: dict, args: dict):
             "message": (
                 "Gallery posts require gallery image data in the 'content' or 'custom_entity' field. "
                 "Create an empty Gallery draft via the Publive dashboard first, "
-                "then use cms_update_post to update other fields programmatically."
+                "then use update_post to update other fields programmatically."
             ),
             "retryable": False,
         }
@@ -216,11 +250,11 @@ def create_post(credentials: dict, args: dict):
         type_hints = {
             "Web Story": (
                 "Web Story posts require valid AMP story slide markup in the 'content' field. "
-                "Create the post via the Publive dashboard first, then update other fields via cms_update_post."
+                "Create the post via the Publive dashboard first, then update other fields via update_post."
             ),
             "Gallery": (
                 "Gallery posts require gallery image data in the 'content' or 'custom_entity' field. "
-                "Create the post via the Publive dashboard first, then update other fields via cms_update_post."
+                "Create the post via the Publive dashboard first, then update other fields via update_post."
             ),
         }
         hint = type_hints.get(post_type)
@@ -246,7 +280,7 @@ def create_post(credentials: dict, args: dict):
             "message": (
                 f"Post was created as Draft (ID: {post_id}) but setting status to "
                 f"{intended_status} failed: {patch_result.get('message', 'unknown error')}. "
-                "Use cms_update_post to retry the status change."
+                "Use update_post to retry the status change."
             ),
             "post_id": post_id,
             "retryable": False,
@@ -303,9 +337,9 @@ def delete_post(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_posts":   list_posts,
-    "cms_get_post":     get_post,
-    "cms_create_post":  create_post,
-    "cms_update_post":  update_post,
-    "cms_delete_post":  delete_post,
+    "list_editorial_posts": list_editorial_posts,
+    "get_editorial_post":   get_editorial_post,
+    "create_post":          create_post,
+    "update_post":          update_post,
+    "delete_post":          delete_post,
 }

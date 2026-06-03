@@ -3,22 +3,22 @@ from ..clients.cds import cds_get
 
 SCHEMAS = [
     {
-        "name": "get_static_ads_txt",
+        "name": "fetch_ads_txt",
         "description": "Get the publisher's ads.txt file content. Returns raw text wrapped in the CDS JSON envelope.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "get_static_robots_txt",
+        "name": "fetch_robots_txt",
         "description": "Get the publisher's robots.txt file content.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "get_static_service_worker",
+        "name": "fetch_service_worker_js",
         "description": "Get the push notification service worker JavaScript file. Returns 404 if push notifications are not enabled.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "get_static_push_notification_html",
+        "name": "fetch_push_notification_html",
         "description": (
             "Get one of the three HTML files required for the push notification permission UI. "
             "Returns 404 if push notifications are not enabled for this publisher."
@@ -37,26 +37,26 @@ SCHEMAS = [
 ]
 
 
-def get_static_ads_txt(credentials: dict, args: dict):
+def fetch_ads_txt(credentials: dict, args: dict):
     return cds_get(credentials, "/static/ads.txt/")
 
 
-def get_static_robots_txt(credentials: dict, args: dict):
+def fetch_robots_txt(credentials: dict, args: dict):
     return cds_get(credentials, "/static/robots.txt/")
 
 
-def get_static_service_worker(credentials: dict, args: dict):
+def fetch_service_worker_js(credentials: dict, args: dict):
     return cds_get(credentials, "/static/service-worker.js/")
 
 
-def get_static_push_notification_html(credentials: dict, args: dict):
+def fetch_push_notification_html(credentials: dict, args: dict):
     filename = args["filename"]
     return cds_get(credentials, f"/static/{filename}/")
 
 
 HANDLERS = {
-    "get_static_ads_txt":               get_static_ads_txt,
-    "get_static_robots_txt":            get_static_robots_txt,
-    "get_static_service_worker":        get_static_service_worker,
-    "get_static_push_notification_html": get_static_push_notification_html,
+    "fetch_ads_txt":               fetch_ads_txt,
+    "fetch_robots_txt":            fetch_robots_txt,
+    "fetch_service_worker_js":     fetch_service_worker_js,
+    "fetch_push_notification_html": fetch_push_notification_html,
 }

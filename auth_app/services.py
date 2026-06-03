@@ -1,9 +1,10 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
-# redirect-URI allowlisting, and CDS credential verification. No HTTP routing here.
+# redirect-URI allowlisting, CDS credential verification, and session TTL checks.
 import base64
 import json
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import parse_qs
 
@@ -11,10 +12,38 @@ import newrelic.agent
 import requests
 from django.conf import settings
 from django.http import HttpRequest, JsonResponse
+from django.utils import timezone
 
 from mcp_app.nr_utils import add_attrs
 
 logger = logging.getLogger(__name__)
+
+
+def check_session_ttl(session) -> bool:
+    """Return True if the session has exceeded its original TTL.
+
+    ttl_seconds == -1  → "Always" session, never expires.
+    ttl_seconds == 0   → browser-session; expiry is browser-controlled.
+    ttl_seconds  > 0   → absolute deadline from session_created_at.
+
+    session_created_at is stored as a Unix integer timestamp (int(timezone.now().timestamp()))
+    to avoid Python 3.9 fromisoformat limitations with timezone-aware ISO strings.
+
+    Django's rolling SESSION_SAVE_EVERY_REQUEST is intentionally disabled so
+    these stored values are the authoritative expiry source.
+    """
+    ttl_seconds = session.get("session_ttl_seconds", -1)
+    if ttl_seconds <= 0:  # always (-1) or browser-session (0) → not expired here
+        return False
+    created_at_ts = session.get("session_created_at")
+    if not created_at_ts:
+        return False
+    try:
+        import time as _time
+        deadline_ts = int(created_at_ts) + int(ttl_seconds)
+        return _time.time() > deadline_ts
+    except (ValueError, TypeError):
+        return False
 
 
 def check_origin(request: HttpRequest) -> Optional[JsonResponse]:

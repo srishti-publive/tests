@@ -57,10 +57,10 @@ def classify_tool_error(exc) -> str:
     return "system_error"
 
 
-_CMS_READ_PREFIXES = ("cms_list_", "cms_get_", "validate_")
+_CMS_READ_PREFIXES = ("list_", "get_", "validate_")
 
 def _is_cms_write(name: str) -> bool:
-    """True for CMS tools that mutate data (create / update / delete / submit)."""
+    """True for CMS tools that mutate data (create / update / delete / register / add / submit)."""
     return name in CMS_TOOL_NAMES and not any(name.startswith(p) for p in _CMS_READ_PREFIXES)
 
 

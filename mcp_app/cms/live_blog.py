@@ -9,7 +9,7 @@ from .helpers import (
 
 SCHEMAS = [
     {
-        "name": "cms_list_live_blog_updates",
+        "name": "list_editorial_liveblog_updates",
         "description": (
             "List all update entries for a LiveBlog post, ordered by creation time descending. "
             "Only applies to posts with type LiveBlog. "
@@ -22,7 +22,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_live_blog_update",
+        "name": "get_liveblog_update",
         "description": (
             "Retrieve a single live blog update entry by its ID. Only applies to posts with type LiveBlog. "
             "Returns results directly — no confirmation step needed."
@@ -37,7 +37,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_live_blog_update",
+        "name": "add_liveblog_update",
         "description": (
             "Add a new update entry to a LiveBlog post. Only applies to posts with type LiveBlog. "
             "Workflow: dry_run=true (default) shows a preview — no changes made. "
@@ -56,7 +56,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_live_blog_update",
+        "name": "update_liveblog_update",
         "description": (
             "Update an existing live blog update entry. Only applies to posts with type LiveBlog. "
             "Workflow: dry_run=true (default) fetches the current entry and shows a diff — no changes made. "
@@ -76,7 +76,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_live_blog_update",
+        "name": "delete_liveblog_update",
         "description": (
             "Permanently delete a live blog update entry. This action CANNOT be undone. "
             "Workflow: dry_run=true (default) shows the full entry — no deletion. "
@@ -96,16 +96,16 @@ SCHEMAS = [
 ]
 
 
-def list_live_blog_updates(credentials: dict, args: dict):
+def list_editorial_liveblog_updates(credentials: dict, args: dict):
     post_id = args["post_id"]
     return cms_get(credentials, f"/post/{post_id}/live-blog-update/")
 
 
-def get_live_blog_update(credentials: dict, args: dict):
+def get_liveblog_update(credentials: dict, args: dict):
     return cms_get(credentials, f"/post/{args['post_id']}/live-blog-update/{args['id']}/")
 
 
-def create_live_blog_update(credentials: dict, args: dict):
+def add_liveblog_update(credentials: dict, args: dict):
     dry_run = args.get("dry_run", True)
     post_id = args["post_id"]
     payload = {k: v for k, v in args.items() if k not in ("dry_run", "post_id")}
@@ -117,7 +117,7 @@ def create_live_blog_update(credentials: dict, args: dict):
     return cms_post(credentials, f"/post/{post_id}/live-blog-update/", payload)
 
 
-def update_live_blog_update(credentials: dict, args: dict):
+def update_liveblog_update(credentials: dict, args: dict):
     dry_run   = args.get("dry_run", True)
     post_id   = args["post_id"]
     update_id = args["id"]
@@ -139,7 +139,7 @@ def update_live_blog_update(credentials: dict, args: dict):
     return cms_patch(credentials, f"/post/{post_id}/live-blog-update/{update_id}/", changes)
 
 
-def delete_live_blog_update(credentials: dict, args: dict):
+def delete_liveblog_update(credentials: dict, args: dict):
     dry_run        = args.get("dry_run", True)
     confirm_delete = args.get("confirm_delete", False)
     post_id        = args["post_id"]
@@ -159,9 +159,9 @@ def delete_live_blog_update(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_live_blog_updates":   list_live_blog_updates,
-    "cms_get_live_blog_update":     get_live_blog_update,
-    "cms_create_live_blog_update":  create_live_blog_update,
-    "cms_update_live_blog_update":  update_live_blog_update,
-    "cms_delete_live_blog_update":  delete_live_blog_update,
+    "list_editorial_liveblog_updates": list_editorial_liveblog_updates,
+    "get_liveblog_update":             get_liveblog_update,
+    "add_liveblog_update":             add_liveblog_update,
+    "update_liveblog_update":          update_liveblog_update,
+    "delete_liveblog_update":          delete_liveblog_update,
 }

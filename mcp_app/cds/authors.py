@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMAS = [
     {
-        "name": "list_authors",
+        "name": "fetch_authors",
         "description": "List all authors/contributors for this publication with pagination.",
         "inputSchema": {
             "type": "object",
@@ -17,11 +17,11 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_author",
+        "name": "fetch_author",
         "description": (
             "Get a single author by their numeric ID. "
             "identifier must be a numeric author ID. "
-            "To find posts by a specific author, use list_posts with the contributors.id__eq filter. "
+            "To find posts by a specific author, use fetch_published_posts with the contributors.id__eq filter. "
             "Do not guess IDs or pass non-numeric values."
         ),
         "inputSchema": {
@@ -35,21 +35,21 @@ SCHEMAS = [
 ]
 
 
-def list_authors(credentials: dict, args: dict):
+def fetch_authors(credentials: dict, args: dict):
     return cds_get(credentials, "/authors/", {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_author(credentials: dict, args: dict):
+def fetch_author(credentials: dict, args: dict):
     identifier = str(args.get("identifier", "")).strip()
     if not identifier:
-        return {"error": "invalid_input", "message": "identifier is required. Use list_authors to find valid numeric author IDs."}
+        return {"error": "invalid_input", "message": "identifier is required. Use fetch_authors to find valid numeric author IDs."}
     if not identifier.isdigit():
-        logger.warning("get_author: non-numeric identifier=%r", identifier)
+        logger.warning("fetch_author: non-numeric identifier=%r", identifier)
         return {
             "error": "invalid_input",
             "message": (
                 f"Author identifier must be a numeric ID, got {identifier!r}. "
-                "Use list_authors to discover valid author IDs."
+                "Use fetch_authors to discover valid author IDs."
             ),
         }
     try:
@@ -62,13 +62,13 @@ def get_author(credentials: dict, args: dict):
                 "error": "not_found",
                 "message": (
                     f"Author with ID {identifier} was not found. "
-                    "Use list_authors to discover valid author IDs."
+                    "Use fetch_authors to discover valid author IDs."
                 ),
             }
         raise
 
 
 HANDLERS = {
-    "list_authors": list_authors,
-    "get_author":   get_author,
+    "fetch_authors": fetch_authors,
+    "fetch_author":  fetch_author,
 }

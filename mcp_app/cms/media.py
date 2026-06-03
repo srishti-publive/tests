@@ -5,7 +5,7 @@ _BASE = "/media-library/"
 
 SCHEMAS = [
     {
-        "name": "cms_list_media",
+        "name": "list_media_assets",
         "description": "List all media assets in the CMS library with pagination. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
@@ -16,7 +16,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_media",
+        "name": "get_media_asset",
         "description": "Retrieve a single media asset from the CMS library by ID. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
@@ -25,7 +25,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_media",
+        "name": "register_media_asset",
         "description": (
             "Register an existing media URL into the CMS library. "
             "Important: this does NOT upload files — it registers an external URL (e.g. from S3, Cloudinary). "
@@ -49,7 +49,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_media",
+        "name": "update_media_asset",
         "description": (
             "Update metadata of an existing media asset. "
             "Immutable fields: path, type. "
@@ -70,7 +70,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_media",
+        "name": "delete_media_asset",
         "description": (
             "Permanently delete a media asset from the library. This action CANNOT be undone. "
             "Posts referencing this media will lose their associated image or file. "
@@ -90,15 +90,15 @@ SCHEMAS = [
 ]
 
 
-def list_media(credentials: dict, args: dict):
+def list_media_assets(credentials: dict, args: dict):
     return cms_get(credentials, _BASE, {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_media(credentials: dict, args: dict):
+def get_media_asset(credentials: dict, args: dict):
     return cms_get(credentials, f"{_BASE}{args['id']}/")
 
 
-def create_media(credentials: dict, args: dict):
+def register_media_asset(credentials: dict, args: dict):
     dry_run = args.get("dry_run", True)
     payload = {k: v for k, v in args.items() if k != "dry_run"}
     if dry_run:
@@ -106,7 +106,7 @@ def create_media(credentials: dict, args: dict):
     return cms_post(credentials, _BASE, payload)
 
 
-def update_media(credentials: dict, args: dict):
+def update_media_asset(credentials: dict, args: dict):
     dry_run  = args.get("dry_run", True)
     media_id = args["id"]
     changes  = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
@@ -118,7 +118,7 @@ def update_media(credentials: dict, args: dict):
     return cms_patch(credentials, f"{_BASE}{media_id}/", changes)
 
 
-def delete_media(credentials: dict, args: dict):
+def delete_media_asset(credentials: dict, args: dict):
     dry_run        = args.get("dry_run", True)
     confirm_delete = args.get("confirm_delete", False)
     media_id       = args["id"]
@@ -136,9 +136,9 @@ def delete_media(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_media":   list_media,
-    "cms_get_media":    get_media,
-    "cms_create_media": create_media,
-    "cms_update_media": update_media,
-    "cms_delete_media": delete_media,
+    "list_media_assets":   list_media_assets,
+    "get_media_asset":     get_media_asset,
+    "register_media_asset": register_media_asset,
+    "update_media_asset":  update_media_asset,
+    "delete_media_asset":  delete_media_asset,
 }

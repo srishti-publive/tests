@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 SCHEMAS = [
     {
-        "name": "list_posts",
+        "name": "fetch_published_posts",
         "description": (
             "List and filter published posts. Supports filtering by type, category, tag, author, date range, title search, and pagination. "
             "Returns only published content. If the user asks for less (e.g. just titles or a quick count), return a summary and offer to fetch more details. "
-            "If the user needs drafts or scheduled posts, suggest cms_list_posts instead."
+            "If the user needs drafts or scheduled posts, suggest list_editorial_posts instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -49,11 +49,11 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_post",
+        "name": "fetch_published_post",
         "description": (
             "Get full details of a single published post by ID or slug. "
             "If the user only needs a few fields (e.g. just the title or author), return only those and offer more. "
-            "If the user needs draft/scheduled post details, suggest cms_get_post instead."
+            "If the user needs draft/scheduled post details, suggest get_editorial_post instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -64,7 +64,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_post_by_url",
+        "name": "fetch_post_by_url",
         "description": (
             "Get a post by its legacy or relative URL path. "
             "IMPORTANT: legacy_url must be a non-empty relative path starting with / "
@@ -83,7 +83,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_live_blog_updates",
+        "name": "fetch_livebupdates",
         "description": (
             "Get published live blog updates for a LiveBlog post. "
             "If the user needs to add, edit, or delete update entries, use the CMS live blog update tools instead."
@@ -99,12 +99,12 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_live_blog_details",
+        "name": "fetch_liveblog_with_updates",
         "description": (
             "Get a LiveBlog post and all its published update entries in a single call. "
             "Returns the full post object alongside a paginated list of updates. "
             "Only works for posts with type LiveBlog — returns an error for any other post type. "
-            "If the user only needs the update entries without post metadata, use get_live_blog_updates instead."
+            "If the user only needs the update entries without post metadata, use fetch_livebupdates instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -117,7 +117,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "get_trending_posts",
+        "name": "fetch_trending_posts",
         "description": (
             "Get top-performing posts ranked by page views over a time window. "
             "Requires Publive analytics to be active. Rankings refresh every 5-10 minutes."
@@ -135,7 +135,7 @@ SCHEMAS = [
 ]
 
 
-def list_posts(credentials: dict, args: dict):
+def fetch_published_posts(credentials: dict, args: dict):
     page  = args.pop("page",  None)
     limit = args.pop("limit", None)
     try:
@@ -148,7 +148,7 @@ def list_posts(credentials: dict, args: dict):
             or "timed out" in str(exc).lower()
         )
         if is_timeout:
-            logger.warning("list_posts: upstream timeout — returning structured error")
+            logger.warning("fetch_published_posts: upstream timeout — returning structured error")
             return {
                 "error": "upstream_timeout",
                 "retry": True,
@@ -160,14 +160,14 @@ def list_posts(credentials: dict, args: dict):
         raise
 
 
-def get_post(credentials: dict, args: dict):
+def fetch_published_post(credentials: dict, args: dict):
     return cds_get(credentials, f"/post/{args['identifier']}/")
 
 
-def get_post_by_url(credentials: dict, args: dict):
+def fetch_post_by_url(credentials: dict, args: dict):
     legacy_url = args.get("legacy_url", "").strip()
     if not legacy_url:
-        logger.warning("get_post_by_url: called with empty legacy_url")
+        logger.warning("fetch_post_by_url: called with empty legacy_url")
         return {
             "error": "invalid_input",
             "message": (
@@ -179,14 +179,35 @@ def get_post_by_url(credentials: dict, args: dict):
     return cds_get(credentials, "/post/", {"legacy_url": legacy_url})
 
 
-def get_live_blog_updates(credentials: dict, args: dict):
+def fetch_livebupdates(credentials: dict, args: dict):
     return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
         "page":  args.get("page"),
         "limit": args.get("limit"),
     })
 
 
-def get_trending_posts(credentials: dict, args: dict):
+def fetch_liveblog_with_updates(credentials: dict, args: dict):
+    post_id = args["post_id"]
+    post    = cds_get(credentials, f"/post/{post_id}/")
+    if isinstance(post, dict) and "error_type" in post:
+        return post
+    post_data = post.get("data", post) if isinstance(post, dict) else post
+    if isinstance(post_data, dict) and post_data.get("type") != "LiveBlog":
+        return {
+            "error": "invalid_input",
+            "message": (
+                f"Post {post_id} is a '{post_data.get('type')}' post, not a LiveBlog. "
+                "This tool only works for LiveBlog-type posts."
+            ),
+        }
+    updates = cds_get(credentials, f"/post/{post_id}/live-blog-updates/", {
+        "page":  args.get("page"),
+        "limit": args.get("limit"),
+    })
+    return {"post": post, "updates": updates}
+
+
+def fetch_trending_posts(credentials: dict, args: dict):
     return cds_get(credentials, "/posts/trending/", {
         "duration": args.get("duration"),
         "limit":    args.get("limit"),
@@ -196,9 +217,10 @@ def get_trending_posts(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "list_posts":           list_posts,
-    "get_post":             get_post,
-    "get_post_by_url":      get_post_by_url,
-    "get_live_blog_updates": get_live_blog_updates,
-    "get_trending_posts":   get_trending_posts,
+    "fetch_published_posts":       fetch_published_posts,
+    "fetch_published_post":        fetch_published_post,
+    "fetch_post_by_url":           fetch_post_by_url,
+    "fetch_livebupdates":          fetch_livebupdates,
+    "fetch_liveblog_with_updates": fetch_liveblog_with_updates,
+    "fetch_trending_posts":        fetch_trending_posts,
 }

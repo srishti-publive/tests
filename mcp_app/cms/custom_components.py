@@ -9,7 +9,7 @@ _BASE = "/entities/content-type/custom-component/"
 
 SCHEMAS = [
     {
-        "name": "cms_list_custom_components",
+        "name": "list_component_schemas",
         "description": "List all custom components with pagination. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
@@ -20,7 +20,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_custom_component",
+        "name": "get_component_schema",
         "description": "Retrieve a single custom component by ID. Returns results directly — no confirmation step needed.",
         "inputSchema": {
             "type": "object",
@@ -29,7 +29,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_custom_component",
+        "name": "create_component_schema",
         "description": (
             "Create a new custom component schema in the CMS. "
             "Custom components are reusable typed-field schemas (like a form builder), NOT HTML templates. "
@@ -49,7 +49,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_custom_component",
+        "name": "update_component_schema",
         "description": (
             "Update an existing custom component schema. "
             "Workflow: dry_run=true (default) fetches current state and shows a diff — no changes made. "
@@ -69,7 +69,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_custom_component",
+        "name": "delete_component_schema",
         "description": (
             "Permanently delete a custom component. This action CANNOT be undone. "
             "Workflow: dry_run=true (default) shows the full component — no deletion. "
@@ -88,15 +88,15 @@ SCHEMAS = [
 ]
 
 
-def list_custom_components(credentials: dict, args: dict):
+def list_component_schemas(credentials: dict, args: dict):
     return cms_get(credentials, _BASE, {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_custom_component(credentials: dict, args: dict):
+def get_component_schema(credentials: dict, args: dict):
     return cms_get(credentials, f"{_BASE}{args['id']}/")
 
 
-def create_custom_component(credentials: dict, args: dict):
+def create_component_schema(credentials: dict, args: dict):
     dry_run = args.get("dry_run", True)
     payload = {k: v for k, v in args.items() if k != "dry_run"}
     if dry_run:
@@ -115,7 +115,7 @@ def create_custom_component(credentials: dict, args: dict):
     return result
 
 
-def update_custom_component(credentials: dict, args: dict):
+def update_component_schema(credentials: dict, args: dict):
     dry_run      = args.get("dry_run", True)
     component_id = args["id"]
     changes      = {k: v for k, v in args.items() if k not in ("id", "dry_run")}
@@ -127,7 +127,7 @@ def update_custom_component(credentials: dict, args: dict):
     return cms_patch(credentials, f"{_BASE}{component_id}/", changes)
 
 
-def delete_custom_component(credentials: dict, args: dict):
+def delete_component_schema(credentials: dict, args: dict):
     dry_run        = args.get("dry_run", True)
     confirm_delete = args.get("confirm_delete", False)
     component_id   = args["id"]
@@ -142,9 +142,9 @@ def delete_custom_component(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_custom_components":   list_custom_components,
-    "cms_get_custom_component":     get_custom_component,
-    "cms_create_custom_component":  create_custom_component,
-    "cms_update_custom_component":  update_custom_component,
-    "cms_delete_custom_component":  delete_custom_component,
+    "list_component_schemas":   list_component_schemas,
+    "get_component_schema":     get_component_schema,
+    "create_component_schema":  create_component_schema,
+    "update_component_schema":  update_component_schema,
+    "delete_component_schema":  delete_component_schema,
 }

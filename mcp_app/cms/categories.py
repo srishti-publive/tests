@@ -3,10 +3,10 @@ from .helpers import DELETION_REQUIRES_CONFIRMATION, preview_create_op, preview_
 
 SCHEMAS = [
     {
-        "name": "cms_list_categories",
+        "name": "list_editorial_categories",
         "description": (
             "List all CMS categories with pagination. Returns every category including unpublished ones. "
-            "NOTE: if the user only needs published categories, prefer the CDS list_categories tool. "
+            "NOTE: if the user only needs published categories, prefer the CDS fetch_published_categories tool. "
             "Use this when the user needs drafts, unpublished categories, or management operations. "
             "Returns results directly — no confirmation step needed."
         ),
@@ -19,10 +19,10 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_get_category",
+        "name": "get_editorial_category",
         "description": (
             "Retrieve a single CMS category by ID. Returns full details including unpublished fields. "
-            "NOTE: if the user only needs basic published data, prefer the CDS get_category tool. "
+            "NOTE: if the user only needs basic published data, prefer the CDS fetch_published_category tool. "
             "Always ask the user for the category ID before calling if not already provided. "
             "Returns results directly — no confirmation step needed."
         ),
@@ -33,7 +33,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_create_category",
+        "name": "create_category",
         "description": (
             "Create a new category in the CMS. "
             "BEFORE calling: confirm all details with the user — at minimum name and english_name. "
@@ -61,7 +61,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_update_category",
+        "name": "update_category",
         "description": (
             "Update an existing category. "
             "BEFORE calling: confirm the category ID and all fields to change with the user. "
@@ -85,7 +85,7 @@ SCHEMAS = [
         },
     },
     {
-        "name": "cms_delete_category",
+        "name": "delete_category",
         "description": (
             "Permanently delete a category. This action CANNOT be undone. "
             "Posts assigned to this category will lose their category assignment. "
@@ -106,11 +106,11 @@ SCHEMAS = [
 ]
 
 
-def list_categories(credentials: dict, args: dict):
+def list_editorial_categories(credentials: dict, args: dict):
     return cms_get(credentials, "/category/", {"page": args.get("page"), "limit": args.get("limit")})
 
 
-def get_category(credentials: dict, args: dict):
+def get_editorial_category(credentials: dict, args: dict):
     return cms_get(credentials, f"/category/{args['id']}/")
 
 
@@ -152,9 +152,9 @@ def delete_category(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "cms_list_categories":   list_categories,
-    "cms_get_category":      get_category,
-    "cms_create_category":   create_category,
-    "cms_update_category":   update_category,
-    "cms_delete_category":   delete_category,
+    "list_editorial_categories": list_editorial_categories,
+    "get_editorial_category":    get_editorial_category,
+    "create_category":           create_category,
+    "update_category":           update_category,
+    "delete_category":           delete_category,
 }

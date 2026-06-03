@@ -75,17 +75,16 @@ SESSION_ENGINE = "django.contrib.sessions.backends.db"
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
-# Override via Railway env var if you want shorter/longer sessions.
-# Default: 7 days (604800 s). Previous value was 1 day (86400 s).
-# Maximum possible session age — individual sessions override this via
-# session.set_expiry() based on the user's "stay logged in for" choice.
-SESSION_COOKIE_AGE = 90 * 24 * 3600   # 90 days ceiling
+# SESSION_COOKIE_AGE is only the ceiling for "Always" sessions (remember_for_days=-1).
+# Individual sessions set their own absolute TTL via session.set_expiry() at login time.
+SESSION_COOKIE_AGE = 10 * 365 * 24 * 3600  # 10-year ceiling for "Always" sessions
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = "Lax"
-# Refresh session TTL on every request so an active session never expires
-# while the user is still using it.
-SESSION_SAVE_EVERY_REQUEST = True
+# Disabled so that Django does NOT roll the session expiry forward on each request.
+# Absolute TTL enforcement uses session_created_at + session_ttl_seconds stored at
+# login time and checked by check_session_ttl() / _resolve_session().
+SESSION_SAVE_EVERY_REQUEST = False
 
 # ── HTTPS / TLS ───────────────────────────────────────────────────────────────
 # Railway terminates TLS at its edge proxy and forwards requests over plain
@@ -107,6 +106,10 @@ OAUTH_ALLOWED_ORIGINS = [
     "https://claude.com",
     "https://chatgpt.com",
 ]
+
+# Static secret key for admin endpoints (/admin/clients/*).
+# Set via Railway env var — leave empty to disable admin endpoints.
+ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "")
 
 # Exact redirect URIs allowed during dynamic client registration (OAuth 2.1).
 OAUTH_ALLOWED_REDIRECT_URIS = [

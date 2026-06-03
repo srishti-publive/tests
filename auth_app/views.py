@@ -1,5 +1,5 @@
-# Responsibility: HTTP view handlers for OAuth 2.0 PKCE flow and session-based auth.
-# Business-logic helpers (origin validation, CDS verification) live in services.py.
+# Responsibility: HTTP view handlers for OAuth 2.0 PKCE flow, session-based auth,
+# AI client direct registration, and admin client management.
 import base64
 import hashlib
 import json
@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import newrelic.agent
 import requests
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -21,9 +22,10 @@ from django.views.decorators.http import require_http_methods
 
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 
-from .models import OAuthClient, OAuthCode, OAuthToken
+from .models import AIClient, OAuthClient, OAuthCode, OAuthToken
 from .services import (
     check_origin,
+    check_session_ttl,
     parse_oauth_token_body,
     redirect_uri_is_registered,
     validate_cds_credentials,
@@ -540,26 +542,44 @@ def auth_login(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"error": f"Could not reach Publive API: {exc}"}, status=500)
 
         if ok:
-            _VALID_DURATIONS: set[int] = {0, 1, 7, 30, 90}
+            # remember_for_days encoding:
+            #   -1 = Always (never expires — 10-year Django expiry)
+            #    0 = This session only (expires when browser closes)
+            #   >0 = N days absolute from login time
+            # Default is 90 days.  Any positive integer is valid (custom).
             try:
-                remember_for_days: int = int(body.get("remember_for_days", 30))
+                remember_for_days: int = int(body.get("remember_for_days", 90))
             except (TypeError, ValueError):
-                remember_for_days = 30
-            if remember_for_days not in _VALID_DURATIONS:
-                remember_for_days = 30
+                remember_for_days = 90
+            if remember_for_days < -1:
+                remember_for_days = 90
 
+            if remember_for_days == -1:
+                ttl_seconds: int = -1                            # always
+            elif remember_for_days == 0:
+                ttl_seconds = 0                                  # browser session
+            else:
+                ttl_seconds = remember_for_days * 24 * 3600     # absolute deadline
+
+            now_ts: int = int(timezone.now().timestamp())   # Unix epoch — avoids fromisoformat py39 bug
+            now_iso: str = timezone.now().isoformat()
             request.session["credentials"] = {
                 "publisherId": publisher_id,
                 "apiKey": api_key,
                 "apiSecret": api_secret,
             }
-            request.session["authenticatedAt"] = datetime.now().isoformat()
+            request.session["authenticatedAt"] = now_iso
+            request.session["session_created_at"] = now_ts   # authoritative clock for TTL check (int epoch)
+            request.session["session_ttl_seconds"] = ttl_seconds
             request.session["remember_for_days"] = remember_for_days
 
-            if remember_for_days == 0:
-                request.session.set_expiry(0)       # browser-session cookie
+            if remember_for_days == -1:
+                # "Always" — set a far-future absolute expiry so Django keeps the session.
+                request.session.set_expiry(10 * 365 * 24 * 3600)
+            elif remember_for_days == 0:
+                request.session.set_expiry(0)                   # browser-session cookie
             else:
-                request.session.set_expiry(remember_for_days * 24 * 3600)
+                request.session.set_expiry(ttl_seconds)         # absolute TTL
 
             add_attrs([
                 ("auth.result", "success"),
@@ -568,8 +588,8 @@ def auth_login(request: HttpRequest) -> JsonResponse:
             ])
             record_metric("Custom/Auth/session_login_count", 1)
             logger.info(
-                "auth_login: success publisher=%s remember_for_days=%d",
-                publisher_id, remember_for_days,
+                "auth_login: success publisher=%s remember_for_days=%d ttl_seconds=%d",
+                publisher_id, remember_for_days, ttl_seconds,
             )
             return JsonResponse({"success": True, "redirectTo": "/auth/success"})
 
@@ -596,17 +616,37 @@ def auth_status(request: HttpRequest) -> JsonResponse:
     try:
         credentials = request.session.get("credentials")
         if credentials:
+            # Enforce server-side absolute TTL — catches sessions that Django's
+            # cookie TTL would miss (e.g. SESSION_SAVE_EVERY_REQUEST disabled).
+            if check_session_ttl(request.session):
+                request.session.flush()
+                add_attrs([("auth.result", "failure"), ("auth.failure_reason", "SESSION_EXPIRED")])
+                return JsonResponse({"authenticated": False, "error": "SESSION_EXPIRED"})
+
             add_attrs([
                 ("auth.result", "success"),
                 ("auth.publisher_id", credentials.get("publisherId")),
             ])
-            expiry_age: int = request.session.get_expiry_age()
+            ttl_seconds: int = request.session.get("session_ttl_seconds", -1)
+            if ttl_seconds == -1:
+                expires_in: Optional[int] = None          # never
+            elif ttl_seconds == 0:
+                expires_in = None                          # browser-controlled
+            else:
+                import time as _time
+                created_at_ts = request.session.get("session_created_at", 0)
+                try:
+                    deadline_ts = int(created_at_ts) + int(ttl_seconds)
+                    expires_in = max(0, int(deadline_ts - _time.time()))
+                except (ValueError, TypeError):
+                    expires_in = request.session.get_expiry_age()
+
             return JsonResponse({
                 "authenticated": True,
                 "publisherId": credentials.get("publisherId"),
                 "authenticatedAt": request.session.get("authenticatedAt"),
-                "remember_for_days": request.session.get("remember_for_days", 30),
-                "session_expires_in_seconds": expiry_age,
+                "remember_for_days": request.session.get("remember_for_days", 90),
+                "session_expires_in_seconds": expires_in,
             })
 
         add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_session")])
@@ -633,3 +673,234 @@ def auth_logout(request: HttpRequest) -> JsonResponse:
     record_metric("Custom/Auth/session_logout_count", 1)
     logger.info("auth_logout: publisher=%s", publisher_id)
     return JsonResponse({"success": True})
+
+
+# ── AI Client direct registration ─────────────────────────────────────────────
+
+def _get_client_ip(request: HttpRequest) -> str:
+    """Return the real client IP, honouring Railway's X-Forwarded-For header."""
+    forwarded_for: str = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "")
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@newrelic.agent.function_trace(name="ai_client_register", group="Auth")
+def ai_client_register(request: HttpRequest) -> JsonResponse:
+    """Open registration for AI clients — no prior credentials required.
+
+    Any programmatic caller (Claude, ChatGPT, scripts) may call this endpoint
+    once to obtain a UUID v4 client_id that serves as its sole bearer credential
+    for all subsequent MCP requests.
+
+    Rate-limited to 5 registrations per IP per hour to prevent mass ID farming.
+    Publive credentials (publisher_id / api_key / api_secret) are optional at
+    registration time.  When provided they are validated against CDS and stored
+    so the client can make tool calls immediately.  Clients without stored
+    credentials will be authenticated (identity check passes) but all tool calls
+    will fail with a 401 asking them to re-register with credentials.
+
+    One-ID-per-client is a POLICY contract, not a technical one.  Multiple
+    registrations from the same IP are logged and visible to admins who can
+    revoke any ID from /admin/clients.
+    """
+    set_txn_name("Auth/ai_client_register", group="Auth")
+    add_attrs([("auth.flow", "ai_client")])
+
+    ip: str = _get_client_ip(request)
+
+    # Rate limiting: max 5 registrations per IP per hour.
+    rate_key: str = f"ai_reg_count:{ip}"
+    current_count: int = cache.get(rate_key, 0)
+    if current_count >= 5:
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", "rate_limited")])
+        logger.warning("ai_client_register: rate limited ip=%s count=%d", ip, current_count)
+        return JsonResponse(
+            {
+                "error": "rate_limited",
+                "error_description": "Maximum 5 registrations per IP per hour. Try again later.",
+            },
+            status=429,
+        )
+    cache.set(rate_key, current_count + 1, timeout=3600)
+
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        body = {}
+
+    client_name: str = str(body.get("client_name", "")).strip()
+    if not client_name:
+        return JsonResponse(
+            {"error": "invalid_request", "error_description": "client_name is required"},
+            status=400,
+        )
+
+    contact: str = str(body.get("contact", "")).strip()
+
+    # Optional Publive credentials — if provided, validate them against CDS.
+    publisher_id_reg: str = str(body.get("publisher_id", "")).strip()
+    api_key_reg: str      = str(body.get("api_key", "")).strip()
+    api_secret_reg: str   = str(body.get("api_secret", "")).strip()
+
+    credentials: Optional[dict] = None
+    if publisher_id_reg and api_key_reg and api_secret_reg:
+        try:
+            ok, status_code = validate_cds_credentials(publisher_id_reg, api_key_reg, api_secret_reg)
+        except requests.RequestException as exc:
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_unreachable")])
+            logger.error("ai_client_register: CDS unreachable ip=%s", ip, exc_info=True)
+            return JsonResponse(
+                {"error": "cds_unreachable", "error_description": f"Could not reach Publive API: {exc}"},
+                status=503,
+            )
+        if not ok:
+            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_credentials")])
+            logger.warning("ai_client_register: invalid CDS credentials ip=%s status=%d", ip, status_code)
+            return JsonResponse(
+                {"error": "invalid_credentials", "error_description": f"CDS rejected credentials (HTTP {status_code})"},
+                status=400,
+            )
+        credentials = {"publisherId": publisher_id_reg, "apiKey": api_key_reg, "apiSecret": api_secret_reg}
+
+    ai_client: AIClient = AIClient.objects.create(
+        client_name=client_name,
+        contact=contact,
+        credentials=credentials,
+        registration_ip=ip,
+    )
+
+    add_attrs([
+        ("auth.result", "success"),
+        ("auth.client_id", str(ai_client.client_id)),
+        ("auth.client_name", client_name),
+        ("auth.has_credentials", credentials is not None),
+    ])
+    record_metric("Custom/Auth/ai_client_registered_count", 1)
+    logger.info(
+        "ai_client_register: success client_id=%s name=%s ip=%s has_credentials=%s",
+        ai_client.client_id, client_name, ip, credentials is not None,
+    )
+
+    return JsonResponse(
+        {
+            "client_id": str(ai_client.client_id),
+            "client_name": ai_client.client_name,
+            "issued_at": int(ai_client.registered_at.timestamp()),
+        },
+        status=201,
+    )
+
+
+# ── Admin — AI client management ──────────────────────────────────────────────
+
+def _require_admin(request: HttpRequest) -> Optional[JsonResponse]:
+    """Return None when admin credentials are valid; return 401 JsonResponse otherwise.
+
+    Admin auth uses a static secret key (ADMIN_SECRET_KEY env var) passed as
+    'Authorization: Bearer <key>'.  This is intentionally separate from client_id
+    auth so that admin actions cannot be performed with a client_id bearer token.
+    """
+    admin_key: str = getattr(settings, "ADMIN_SECRET_KEY", "")
+    if not admin_key:
+        return JsonResponse(
+            {"error": "admin_not_configured", "error_description": "ADMIN_SECRET_KEY is not set on this server"},
+            status=503,
+        )
+    auth: str = request.META.get("HTTP_AUTHORIZATION", "")
+    if not auth.startswith("Bearer "):
+        return JsonResponse(
+            {"error": "unauthorized", "error_description": "Admin credentials required (Authorization: Bearer <key>)"},
+            status=401,
+        )
+    provided_key: str = auth[len("Bearer "):].strip()
+    if provided_key != admin_key:
+        return JsonResponse(
+            {"error": "unauthorized", "error_description": "Invalid admin credentials"},
+            status=401,
+        )
+    return None
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def admin_clients_list(request: HttpRequest) -> JsonResponse:
+    """List all registered AI clients with status, registration IP, and last_seen_at."""
+    err = _require_admin(request)
+    if err:
+        return err
+
+    clients = AIClient.objects.all().order_by("-registered_at")
+    return JsonResponse({
+        "clients": [
+            {
+                "client_id":       str(c.client_id),
+                "client_name":     c.client_name,
+                "contact":         c.contact,
+                "status":          c.status,
+                "registered_at":   c.registered_at.isoformat(),
+                "registration_ip": c.registration_ip,
+                "last_seen_at":    c.last_seen_at.isoformat() if c.last_seen_at else None,
+            }
+            for c in clients
+        ],
+        "count": clients.count(),
+    })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def admin_client_block(request: HttpRequest, client_id: str) -> JsonResponse:
+    """Block an AI client — effective on its very next request."""
+    err = _require_admin(request)
+    if err:
+        return err
+
+    try:
+        ai_client = AIClient.objects.get(client_id=client_id)
+    except (AIClient.DoesNotExist, Exception):
+        return JsonResponse({"error": "not_found", "error_description": f"No client with id {client_id}"}, status=404)
+
+    ai_client.status = AIClient.STATUS_BLOCKED
+    ai_client.save(update_fields=["status"])
+    logger.info("admin: blocked AI client client_id=%s", client_id)
+    return JsonResponse({"success": True, "client_id": str(ai_client.client_id), "status": "blocked"})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def admin_client_unblock(request: HttpRequest, client_id: str) -> JsonResponse:
+    """Restore a blocked AI client to active status."""
+    err = _require_admin(request)
+    if err:
+        return err
+
+    try:
+        ai_client = AIClient.objects.get(client_id=client_id)
+    except (AIClient.DoesNotExist, Exception):
+        return JsonResponse({"error": "not_found", "error_description": f"No client with id {client_id}"}, status=404)
+
+    ai_client.status = AIClient.STATUS_ACTIVE
+    ai_client.save(update_fields=["status"])
+    logger.info("admin: unblocked AI client client_id=%s", client_id)
+    return JsonResponse({"success": True, "client_id": str(ai_client.client_id), "status": "active"})
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def admin_client_delete(request: HttpRequest, client_id: str) -> JsonResponse:
+    """Permanently revoke and delete an AI client record."""
+    err = _require_admin(request)
+    if err:
+        return err
+
+    try:
+        ai_client = AIClient.objects.get(client_id=client_id)
+    except (AIClient.DoesNotExist, Exception):
+        return JsonResponse({"error": "not_found", "error_description": f"No client with id {client_id}"}, status=404)
+
+    ai_client.delete()
+    logger.info("admin: deleted AI client client_id=%s", client_id)
+    return JsonResponse({"success": True, "client_id": str(client_id)})

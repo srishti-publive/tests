@@ -54,69 +54,90 @@ Session cookie is valid for **7 days** (`SESSION_COOKIE_AGE = 604800`). Credenti
 
 ## Tools Reference
 
-### CDS Tools — Read Only (19 tools)
+### Delivery Tools — Read Only (31 tools)
 
-All CDS tools are read-only GET requests against `https://cds-beta.thepublive.com/publisher/{publisherId}/`. No changes are made to any data.
+All delivery tools are read-only GET requests against `https://cds-beta.thepublive.com/publisher/{publisherId}/`. No changes are made to any data.
 
-#### Posts (5 tools)
+#### Posts (6 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `list_posts` | List and filter published posts | — | `page`, `limit`, `type__eq`, `type__neq`, `type__in`, `type__nin`, `title__contains`, `categories.id__eq`, `categories.id__in`, `categories.id__nin`, `tags.id__eq`, `tags.id__in`, `tags.id__nin`, `contributors.id__eq`, `contributors.id__in`, `created_at__gte`, `created_at__lte`, `word_count__gt`, `word_count__lt` |
-| `get_post` | Get full details of a single post by ID or slug | `identifier` | — |
-| `get_post_by_url` | Get a post by its legacy or relative URL path (must start with `/`) | `legacy_url` | — |
-| `get_trending_posts` | Top-performing posts ranked by page views. Requires Publive analytics active. Rankings refresh every 5–10 minutes | — | `duration` (`24h`/`7d`/`30d`, default `24h`), `limit`, `page`, `type__eq` |
-| `get_live_blog_updates` | Get live blog update entries for a LiveBlog post | `post_id` | `page`, `limit` |
+| `fetch_published_posts` | List and filter published posts | — | `page`, `limit`, `type__eq`, `type__neq`, `type__in`, `type__nin`, `title__contains`, `categories.id__eq`, `categories.id__in`, `categories.id__nin`, `tags.id__eq`, `tags.id__in`, `tags.id__nin`, `contributors.id__eq`, `contributors.id__in`, `created_at__gte`, `created_at__lte`, `word_count__gt`, `word_count__lt` |
+| `fetch_published_post` | Get full details of a single post by ID or slug | `identifier` | — |
+| `fetch_post_by_url` | Get a post by its legacy or relative URL path (must start with `/`) | `legacy_url` | — |
+| `fetch_trending_posts` | Top-performing posts ranked by page views. Requires Publive analytics active. Rankings refresh every 5–10 minutes | — | `duration` (`24h`/`7d`/`30d`, default `24h`), `limit`, `page`, `type__eq` |
+| `fetch_livebupdates` | Get published live blog update entries for a LiveBlog post | `post_id` | `page`, `limit` |
+| `fetch_liveblog_with_updates` | Get a LiveBlog post and all its published update entries in a single call | `post_id` | `page`, `limit` |
 
 #### Categories (2 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `list_categories` | List all categories with hierarchical structure | — | `page`, `limit` |
-| `get_category` | Get a single category by ID or slug including SEO metadata and child categories | `identifier` | — |
+| `fetch_published_categories` | List all categories with hierarchical structure | — | `page`, `limit` |
+| `fetch_published_category` | Get a single category by ID or slug including SEO metadata and child categories | `identifier` | — |
 
 #### Tags (2 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `list_tags` | List all tags | — | `page`, `limit` |
-| `get_tag` | Get a single tag by ID or slug | `identifier` | — |
+| `fetch_published_tags` | List all tags | — | `page`, `limit` |
+| `fetch_published_tag` | Get a single tag by ID or slug | `identifier` | — |
 
 #### Authors (2 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `list_authors` | List all authors/contributors for this publication | — | `page`, `limit` |
-| `get_author` | Get a single author by numeric ID | `identifier` (numeric) | — |
+| `fetch_authors` | List all authors/contributors for this publication | — | `page`, `limit` |
+| `fetch_author` | Get a single author by numeric ID | `identifier` (numeric) | — |
 
-#### Site Structure (3 tools)
+#### Site Structure (4 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `get_publisher_data` | Publisher profile: branding, logo, accent colors, social links, app store URLs. Falls back to footer data if primary endpoint unavailable | — | — |
-| `get_navbar` | Navigation menu configuration including nested items and links | — | — |
-| `get_footer` | Footer layout: menus, links, copyright, app store URLs, social links, logo | — | — |
+| `fetch_publisher_profile` | Publisher profile: branding, logo, accent colors, social links, app store URLs. Falls back to footer data if primary endpoint unavailable | — | — |
+| `fetch_site_navigation` | Navigation menu configuration including nested items and links | — | — |
+| `fetch_site_footer` | Footer layout: menus, links, copyright, app store URLs, social links, logo | — | — |
+| `fetch_newsletter_groups` | All newsletter groups with metadata. Returns `not_configured` error if publisher has no newsletter — do not retry | — | — |
 
 #### Content Metadata (4 tools)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `get_content_types` | All content types configured for this publication (e.g. Article, Video, Web Story) | — | — |
-| `get_active_slots` | Configured advertisement slots with dimensions and HTML content | — | — |
-| `get_newsletter_groups` | All newsletter groups with metadata. Returns `not_configured` error if publisher has no newsletter — do not retry | — | — |
-| `get_form_schema` | Form schema by ID including field definitions, validation rules, and captcha config | `schema_id` (24-char hex) | `page_source` |
+| `fetch_content_type_definitions` | All content types configured for this publication (e.g. Article, Video, Web Story) | — | — |
+| `fetch_ad_slots` | Configured advertisement slots with dimensions and HTML content | — | — |
+| `fetch_form_schema` | Form schema by ID including field definitions, validation rules, and captcha config | `schema_id` (24-char hex) | `page_source` |
 
 #### Content Resolution (1 tool)
 
 | Tool | Description | Required | Optional |
 |---|---|---|---|
-| `identify_content` | Resolve a URL path to its content type: post, category, tag, author, redirect, or not_found | `legacy_url` | — |
+| `resolve_url_to_content_type` | Resolve a URL path to its content type: post, category, tag, author, redirect, or not_found | `legacy_url` | — |
+
+#### Sitemaps (6 tools)
+
+| Tool | Description | Required | Optional |
+|---|---|---|---|
+| `fetch_sitemap_index` | Master sitemap XML index for all published content | — | — |
+| `fetch_sitemap_web_index` | Web content sitemap XML index linking to paginated article sitemaps | — | — |
+| `fetch_sitemap_web_stories` | Web story sitemap XML index linking to paginated web story sitemaps | — | — |
+| `fetch_sitemap_news` | Google News sitemap XML | — | — |
+| `fetch_sitemap_categories` | Sitemap XML listing all published category pages | — | — |
+| `fetch_sitemap_page` | Paginated date-stamped sitemap (article or web story). Discover valid dates from `fetch_sitemap_web_index` or `fetch_sitemap_web_stories` first | `date` | `type` (`article`/`webstory`) |
+
+#### Static Files (4 tools)
+
+| Tool | Description | Required | Optional |
+|---|---|---|---|
+| `fetch_ads_txt` | Publisher's ads.txt file content | — | — |
+| `fetch_robots_txt` | Publisher's robots.txt file content | — | — |
+| `fetch_service_worker_js` | Push notification service worker JavaScript file | — | — |
+| `fetch_push_notification_html` | One of three HTML files for the push notification permission UI | `filename` | — |
 
 ---
 
-### CMS Tools — Write (34 tools)
+### Editorial Tools — Write (40 tools)
 
-All CMS tools call `https://cms-beta.thepublive.com/publisher/{publisherId}/`. Write operations use a tiered safety model:
+All editorial tools call `https://cms-beta.thepublive.com/publisher/{publisherId}/`. Write operations use a tiered safety model:
 
 **Tier 1 — List / Get:** Direct call. No `dry_run`. Always executes immediately.
 
@@ -130,61 +151,71 @@ All CMS tools call `https://cms-beta.thepublive.com/publisher/{publisherId}/`. W
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_categories` | `page`, `limit` | Returns all categories including unpublished |
-| `cms_get_category` | `id` (required) | — |
-| `cms_create_category` | `name`, `english_name` (required); `slug`, `meta_title`, `h1_tag`, `meta_description`, `parent_category`, `priority`, `content`, `category_brand_color`, `content_type`, `dry_run` | Immutable after creation: `english_name`, `slug`, `parent_category`, `content_type` |
-| `cms_update_category` | `id` (required); `name`, `meta_title`, `meta_description`, `content`, `category_brand_color`, `priority`, `dry_run` | Cannot change: `english_name`, `slug`, `content_type` |
-| `cms_delete_category` | `id` (required); `dry_run`, `confirm_delete` | Posts lose category assignment on delete |
+| `list_editorial_categories` | `page`, `limit` | Returns all categories including unpublished |
+| `get_editorial_category` | `id` (required) | — |
+| `create_category` | `name`, `english_name` (required); `slug`, `meta_title`, `h1_tag`, `meta_description`, `parent_category`, `priority`, `content`, `category_brand_color`, `content_type`, `dry_run` | Immutable after creation: `english_name`, `slug`, `parent_category`, `content_type` |
+| `update_category` | `id` (required); `name`, `meta_title`, `meta_description`, `content`, `category_brand_color`, `priority`, `dry_run` | Cannot change: `english_name`, `slug`, `content_type` |
+| `delete_category` | `id` (required); `dry_run`, `confirm_delete` | Posts lose category assignment on delete |
 
 #### Tags (5 tools)
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_tags` | `page`, `limit` | — |
-| `cms_get_tag` | `id` (required) | — |
-| `cms_create_tag` | `name`, `english_name` (required); `slug`, `meta_title`, `meta_description`, `content`, `dry_run` | Immutable after creation: `english_name`, `slug` |
-| `cms_update_tag` | `id` (required); `name`, `meta_title`, `meta_description`, `content`, `dry_run` | Cannot change: `english_name`, `slug` |
-| `cms_delete_tag` | `id` (required); `dry_run`, `confirm_delete` | — |
+| `list_editorial_tags` | `page`, `limit` | — |
+| `get_editorial_tag` | `id` (required) | — |
+| `create_tag` | `name`, `english_name` (required); `slug`, `meta_title`, `meta_description`, `content`, `dry_run` | Immutable after creation: `english_name`, `slug` |
+| `update_tag` | `id` (required); `name`, `meta_title`, `meta_description`, `content`, `dry_run` | Cannot change: `english_name`, `slug` |
+| `delete_tag` | `id` (required); `dry_run`, `confirm_delete` | — |
 
 #### Posts (5 tools)
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_posts` | `page`, `limit` | Includes drafts, published, and scheduled — unlike CDS `list_posts` which is published-only |
-| `cms_get_post` | `id` (required) | Returns full post including draft content |
-| `cms_create_post` | `title`, `english_title`, `type`, `status`, `primary_category` (required); `contributors`, `content`, `tags`, `categories`, `banner_url`, `banner_description`, `short_description`, `summary`, `seo_keyphrase`, `slug`, `scheduled_at`, `hide_banner_image`, `custom_published_at`, `dry_run` | Immutable after creation: `english_title`, `type`, `slug`, `meta_data`, `custom_published_at` |
-| `cms_update_post` | `id` (required); `title`, `content`, `status`, `primary_category`, `contributors`, `tags`, `categories`, `banner_url`, `short_description`, `hide_banner_image`, `custom_published_at`, `scheduled_at`, `dry_run`, `confirm_publish` | Setting `status=Published` with `dry_run=false` also requires `confirm_publish=true`. Cannot change: `english_title`, `type`, `slug` |
-| `cms_delete_post` | `id` (required); `dry_run`, `confirm_delete` | Permanently removes post and all associated data |
+| `list_editorial_posts` | `page`, `limit` | Includes drafts, published, and scheduled — unlike `fetch_published_posts` which is published-only |
+| `get_editorial_post` | `id` (required) | Returns full post including draft content |
+| `create_post` | `title`, `english_title`, `type`, `status`, `primary_category` (required); `contributors`, `content`, `tags`, `categories`, `banner_url`, `banner_description`, `short_description`, `summary`, `seo_keyphrase`, `slug`, `scheduled_at`, `hide_banner_image`, `custom_published_at`, `dry_run` | Immutable after creation: `english_title`, `type`, `slug`, `meta_data`, `custom_published_at` |
+| `update_post` | `id` (required); `title`, `content`, `status`, `primary_category`, `contributors`, `tags`, `categories`, `banner_url`, `short_description`, `hide_banner_image`, `custom_published_at`, `scheduled_at`, `dry_run`, `confirm_publish` | Setting `status=Published` with `dry_run=false` also requires `confirm_publish=true`. Cannot change: `english_title`, `type`, `slug` |
+| `delete_post` | `id` (required); `dry_run`, `confirm_delete` | Permanently removes post and all associated data |
 
 #### Live Blog Updates (5 tools)
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_live_blog_updates` | `post_id` (required) | Only applies to posts with `type=LiveBlog` |
-| `cms_get_live_blog_update` | `post_id`, `id` (required) | — |
-| `cms_create_live_blog_update` | `post_id`, `title`, `content` (required); `dry_run` | — |
-| `cms_update_live_blog_update` | `post_id`, `id` (required); `title`, `content`, `dry_run` | — |
-| `cms_delete_live_blog_update` | `post_id`, `id` (required); `dry_run`, `confirm_delete` | — |
+| `list_editorial_liveblog_updates` | `post_id` (required) | Only applies to posts with `type=LiveBlog` |
+| `get_liveblog_update` | `post_id`, `id` (required) | — |
+| `add_liveblog_update` | `post_id`, `title`, `content` (required); `is_pinned`, `dry_run` | — |
+| `update_liveblog_update` | `post_id`, `id` (required); `title`, `content`, `is_pinned`, `dry_run` | — |
+| `delete_liveblog_update` | `post_id`, `id` (required); `dry_run`, `confirm_delete` | — |
 
 #### Media Library (5 tools)
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_media` | `page`, `limit` | — |
-| `cms_get_media` | `id` (required) | — |
-| `cms_create_media` | `filename`, `path` (required); `alt_text`, `caption`, `source`, `type`, `meta_data`, `dry_run` | Registers an external URL (S3, Cloudinary etc.) — does **not** upload files. Immutable after creation: `path`, `type` |
-| `cms_update_media` | `id` (required); `filename`, `alt_text`, `caption`, `source`, `meta_data`, `dry_run` | Cannot change: `path`, `type` |
-| `cms_delete_media` | `id` (required); `dry_run`, `confirm_delete` | Posts referencing this media lose their image/file |
+| `list_media_assets` | `page`, `limit` | — |
+| `get_media_asset` | `id` (required) | — |
+| `register_media_asset` | `filename`, `path` (required); `alt_text`, `caption`, `source`, `type`, `meta_data`, `dry_run` | Registers an external URL (S3, Cloudinary etc.) — does **not** upload files. Immutable after creation: `path`, `type` |
+| `update_media_asset` | `id` (required); `filename`, `alt_text`, `caption`, `source`, `meta_data`, `dry_run` | Cannot change: `path`, `type` |
+| `delete_media_asset` | `id` (required); `dry_run`, `confirm_delete` | Posts referencing this media lose their image/file |
 
-#### Custom Components (5 tools)
+#### Component Schemas (5 tools)
 
 | Tool | Key Params | Notes |
 |---|---|---|
-| `cms_list_custom_components` | `page`, `limit` | — |
-| `cms_get_custom_component` | `id` (required) | — |
-| `cms_create_custom_component` | `name` (required); `content`, `dry_run` | — |
-| `cms_update_custom_component` | `id` (required); `name`, `content`, `dry_run` | — |
-| `cms_delete_custom_component` | `id` (required); `dry_run`, `confirm_delete` | — |
+| `list_component_schemas` | `page`, `limit` | — |
+| `get_component_schema` | `id` (required) | — |
+| `create_component_schema` | `name` (required); `meta_data`, `field_types`, `settings`, `dry_run` | — |
+| `update_component_schema` | `id` (required); `name`, `meta_data`, `field_types`, `settings`, `dry_run` | `field_types` replaces the whole array |
+| `delete_component_schema` | `id` (required); `dry_run`, `confirm_delete` | — |
+
+#### Content Type Schemas (5 tools)
+
+| Tool | Key Params | Notes |
+|---|---|---|
+| `list_content_type_schemas` | `page`, `limit` | — |
+| `get_content_type_schema` | `id` (required) | — |
+| `create_content_type_schema` | `name`, `api_slug`, `api_collections_slug` (required); `field_types`, `groups`, `components`, `settings`, `dry_run` | Immutable after creation: `api_slug`, `api_collections_slug` |
+| `update_content_type_schema` | `id` (required); `name`, `field_types`, `groups`, `components`, `settings`, `dry_run` | Cannot change: `api_slug`, `api_collections_slug` |
+| `delete_content_type_schema` | `id` (required); `dry_run`, `confirm_delete` | All content entries lose their schema reference |
 
 #### Validation Tools — Pre-flight Checks (4 tools)
 
@@ -192,10 +223,16 @@ Read-only tools that check whether a resource exists before using its ID in a cr
 
 | Tool | Params | Returns |
 |---|---|---|
-| `validate_media_exists` | `id` (integer) | `{valid, id, filename, path}` or `{valid: false, reason}` |
-| `validate_category_exists` | `id` (integer) | `{valid, id, name}` or `{valid: false, reason}` |
-| `validate_author_exists` | `id` (integer) | `{valid, id, name}` or `{valid: false, reason}` (checks CDS) |
+| `validate_media_asset` | `id` (integer) | `{valid, id, filename, path}` or `{valid: false, reason}` |
+| `validate_category` | `id` (integer) | `{valid, id, name}` or `{valid: false, reason}` |
+| `validate_author` | `id` (integer) | `{valid, id, name}` or `{valid: false, reason}` (checks CDS) |
 | `validate_post_slug` | `slug` (string) | `{valid: true, slug, available: true}` if free, or `{valid: false, reason}` if taken |
+
+#### Forms (1 tool)
+
+| Tool | Key Params | Notes |
+|---|---|---|
+| `submit_form` | `form_schema_id`, `recaptcha_token` (required); `fields` | No dry_run — submissions are always live. Use `fetch_form_schema` first to discover required fields |
 
 ---
 
@@ -220,7 +257,7 @@ Fields that cannot be changed after creation (CMS API enforces this):
 
 3. **Double confirmation for delete** — Deletes require *two* explicit overrides: `dry_run=false` to bypass the preview, and `confirm_delete=true` to acknowledge the action is irreversible. Either alone is insufficient.
 
-4. **Publish gate** — Setting a post's `status` to `Published` (via `cms_update_post`) with `dry_run=false` additionally requires `confirm_publish=true`. Prevents accidental publishing during bulk updates.
+4. **Publish gate** — Setting a post's `status` to `Published` (via `update_post`) with `dry_run=false` additionally requires `confirm_publish=true`. Prevents accidental publishing during bulk updates.
 
 5. **Per-session write rate limit** — SSE sessions are capped at 50 CMS write operations (create/update/delete). The 51st write returns a `rate_limit` error instructing the client to start a new session.
 
@@ -288,7 +325,7 @@ Fields that cannot be changed after creation (CMS API enforces this):
 | `Custom/MCP/session_queue_depth` | Current depth of the per-session SSE message queue |
 | `Custom/MCP/session_abandon_count` | Sessions that closed with 0 tool calls |
 | `Custom/MCP/sse_session_missing_count` | POST /mcp/message hits for sessions not found (cross-worker routing failures) |
-| `Custom/MCP/fallback_count` | Times `get_publisher_data` fell back to `/footer/` |
+| `Custom/MCP/fallback_count` | Times `fetch_publisher_profile` fell back to `/footer/` |
 | `Custom/MCP/prompt_event_dropped_count` | MCPPrompt events dropped due to the 1000/min rate cap |
 
 #### Custom/Tool/\* metrics
@@ -378,9 +415,18 @@ SINCE 1 hour ago FACET mcp.tool_name
 SELECT count(*) FROM Transaction WHERE mcp.tool_is_error = true
 SINCE 1 hour ago FACET mcp.tool_name
 
--- CMS tool latency (p95)
+-- Editorial (CMS) tool latency (p95)
 SELECT percentile(mcp.tool_duration_ms, 95) FROM Transaction
-WHERE mcp.tool_name LIKE 'cms_%' SINCE 1 hour ago FACET mcp.tool_name
+WHERE mcp.tool_name IN (
+  'list_editorial_posts', 'get_editorial_post', 'create_post', 'update_post', 'delete_post',
+  'list_editorial_categories', 'get_editorial_category', 'create_category', 'update_category', 'delete_category',
+  'list_editorial_tags', 'get_editorial_tag', 'create_tag', 'update_tag', 'delete_tag',
+  'list_media_assets', 'get_media_asset', 'register_media_asset', 'update_media_asset', 'delete_media_asset',
+  'list_editorial_liveblog_updates', 'get_liveblog_update', 'add_liveblog_update', 'update_liveblog_update', 'delete_liveblog_update',
+  'list_component_schemas', 'get_component_schema', 'create_component_schema', 'update_component_schema', 'delete_component_schema',
+  'list_content_type_schemas', 'get_content_type_schema', 'create_content_type_schema', 'update_content_type_schema', 'delete_content_type_schema',
+  'validate_author', 'validate_category', 'validate_media_asset', 'validate_post_slug', 'submit_form'
+) SINCE 1 hour ago FACET mcp.tool_name
 
 -- Session summary: tool sequences
 SELECT session_id, tool_sequence, tool_call_count, duration_ms
