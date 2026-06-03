@@ -5,7 +5,7 @@ from django.test import TestCase, Client, RequestFactory
 from django.utils import timezone
 
 from auth_app.models import OAuthToken
-from mcp_app.views import _get_credentials
+from mcp_app.protocol.auth import resolve_credentials as _get_credentials
 
 
 def _make_token(expired=False):
