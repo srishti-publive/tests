@@ -28,8 +28,7 @@ def _pkce_pair():
 def _make_client(redirect_uri=ALLOWED_REDIRECT):
     return OAuthClient.objects.create(
         client_id=secrets.token_urlsafe(16),
-        redirect_uris=[redirect_uri],
-        expires_at=timezone.now() + timedelta(days=90),
+        redirect_uri=redirect_uri,
     )
 
 
@@ -69,18 +68,16 @@ class OAuthRegisterTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "invalid_redirect_uri")
 
-    def test_register_prunes_expired_clients(self):
-        expired = OAuthClient.objects.create(
-            client_id="expired_client_xyz",
-            redirect_uris=[ALLOWED_REDIRECT],
-            expires_at=timezone.now() - timedelta(days=1),
-        )
-        self.c.post(
+    def test_register_permanent_no_expiry(self):
+        """Client registrations are now permanent — no expires_at field."""
+        resp = self.c.post(
             "/register",
             json.dumps({"redirect_uris": [ALLOWED_REDIRECT]}),
             content_type="application/json",
         )
-        self.assertFalse(OAuthClient.objects.filter(client_id="expired_client_xyz").exists())
+        self.assertEqual(resp.status_code, 201)
+        client = OAuthClient.objects.get(client_id=resp.json()["client_id"])
+        self.assertFalse(hasattr(client, "expires_at"))
 
     def test_register_only_post_allowed(self):
         resp = self.c.get("/register")
@@ -112,15 +109,11 @@ class OAuthAuthorizeGetTests(TestCase):
         })
         self.assertEqual(resp.status_code, 400)
 
-    def test_get_expired_client_returns_error(self):
-        expired = OAuthClient.objects.create(
-            client_id="expired_xyz",
-            redirect_uris=[ALLOWED_REDIRECT],
-            expires_at=timezone.now() - timedelta(days=1),
-        )
+    def test_get_unknown_client_returns_400(self):
+        """No expiry concept any more — unknown client_id is simply rejected."""
         resp = self.c.get("/authorize", {
             "response_type": "code",
-            "client_id": "expired_xyz",
+            "client_id": "totally_unknown_xyz",
             "redirect_uri": ALLOWED_REDIRECT,
         })
         self.assertEqual(resp.status_code, 400)

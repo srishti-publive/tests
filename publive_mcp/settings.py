@@ -107,10 +107,6 @@ OAUTH_ALLOWED_ORIGINS = [
     "https://chatgpt.com",
 ]
 
-# Static secret key for admin endpoints (/admin/clients/*).
-# Set via Railway env var — leave empty to disable admin endpoints.
-ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY", "")
-
 # Exact redirect URIs allowed during dynamic client registration (OAuth 2.1).
 OAUTH_ALLOWED_REDIRECT_URIS = [
     "https://claude.ai/api/mcp/auth_callback",

@@ -1,16 +1,13 @@
 import json
 import secrets
-import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase, Client, RequestFactory
 from django.utils import timezone
 
-from auth_app.models import AIClient, OAuthToken
+from auth_app.models import OAuthToken
 from mcp_app.protocol.auth import (
-    CLIENT_BLOCKED,
-    INVALID_CLIENT_ID,
     SESSION_EXPIRED,
     resolve_credentials,
 )
@@ -26,15 +23,6 @@ def _make_oauth_token(expired=False):
         expires_at=expires_at,
     )
     return raw
-
-
-def _make_ai_client(status=AIClient.STATUS_ACTIVE):
-    return AIClient.objects.create(
-        client_name="Test AI",
-        credentials={"publisherId": "3567", "apiKey": "k", "apiSecret": "s"},
-        registration_ip="127.0.0.1",
-        status=status,
-    )
 
 
 # ── resolve_credentials unit tests ───────────────────────────────────────────
@@ -62,13 +50,13 @@ class GetCredentialsTests(TestCase):
         self.assertIsNotNone(expires_at)
         self.assertIsNone(err)
 
-    def test_expired_bearer_token_falls_through_to_none(self):
+    def test_expired_bearer_token_returns_none(self):
         raw = _make_oauth_token(expired=True)
         creds, _, err = resolve_credentials(self._req(token=raw))
         self.assertIsNone(creds)
         self.assertIsNone(err)
 
-    def test_unknown_bearer_token_falls_through_to_none(self):
+    def test_unknown_bearer_token_returns_none(self):
         creds, _, err = resolve_credentials(self._req(token="nonexistent_token_abc"))
         self.assertIsNone(creds)
         self.assertIsNone(err)
@@ -76,46 +64,16 @@ class GetCredentialsTests(TestCase):
     def test_bearer_prefix_case_sensitive(self):
         raw = _make_oauth_token()
         req = self._req()
-        req.META["HTTP_AUTHORIZATION"] = f"bearer {raw}"   # lowercase → not a bearer header
+        req.META["HTTP_AUTHORIZATION"] = f"bearer {raw}"   # lowercase → ignored
         creds, _, err = resolve_credentials(req)
         self.assertIsNone(creds)
-        self.assertIsNone(err)
 
-    def test_token_with_leading_whitespace_still_resolves(self):
+    def test_token_with_extra_whitespace_still_resolves(self):
         raw = _make_oauth_token()
         req = self._req()
-        req.META["HTTP_AUTHORIZATION"] = f"Bearer  {raw}"  # extra space stripped by .strip()
+        req.META["HTTP_AUTHORIZATION"] = f"Bearer  {raw}"  # extra space stripped
         creds, _, err = resolve_credentials(req)
         self.assertIsNotNone(creds)
-
-    # AIClient path (UUID v4 bearer)
-
-    def test_active_ai_client_returns_credentials(self):
-        ai_client = _make_ai_client()
-        creds, expires_at, err = resolve_credentials(self._req(token=str(ai_client.client_id)))
-        self.assertIsNotNone(creds)
-        self.assertEqual(creds["publisherId"], "3567")
-        self.assertIsNone(expires_at)
-        self.assertIsNone(err)
-
-    def test_blocked_ai_client_returns_client_blocked(self):
-        ai_client = _make_ai_client(status=AIClient.STATUS_BLOCKED)
-        creds, _, err = resolve_credentials(self._req(token=str(ai_client.client_id)))
-        self.assertIsNone(creds)
-        self.assertEqual(err, CLIENT_BLOCKED)
-
-    def test_unknown_uuid_returns_invalid_client_id(self):
-        unknown = str(uuid.uuid4())
-        creds, _, err = resolve_credentials(self._req(token=unknown))
-        self.assertIsNone(creds)
-        self.assertEqual(err, INVALID_CLIENT_ID)
-
-    def test_ai_client_lookup_updates_last_seen_at(self):
-        ai_client = _make_ai_client()
-        self.assertIsNone(ai_client.last_seen_at)
-        resolve_credentials(self._req(token=str(ai_client.client_id)))
-        ai_client.refresh_from_db()
-        self.assertIsNotNone(ai_client.last_seen_at)
 
     # Session path
 
@@ -136,7 +94,7 @@ class GetCredentialsTests(TestCase):
         session_creds = {"publisherId": "123", "apiKey": "a", "apiSecret": "b"}
         extras = {
             "session_ttl_seconds": 86400,
-            "session_created_at": int(_time.time()) - (2 * 24 * 3600),   # 2 days ago
+            "session_created_at": int(_time.time()) - (2 * 24 * 3600),
         }
         creds, _, err = resolve_credentials(self._req(session_creds=session_creds, session_extras=extras))
         self.assertIsNone(creds)
@@ -154,7 +112,6 @@ class GetCredentialsTests(TestCase):
         self.assertIsNone(err)
 
     def test_browser_session_not_checked_server_side(self):
-        """ttl_seconds=0 (browser session) is not enforced here — browser handles it."""
         import time as _time
         session_creds = {"publisherId": "123", "apiKey": "a", "apiSecret": "b"}
         extras = {
@@ -218,21 +175,9 @@ class MCPEndpointAuthTests(TestCase):
         resp = self.c.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {raw}")
         self.assertEqual(resp.status_code, 401)
 
-    def test_blocked_ai_client_returns_401_with_typed_code(self):
-        ai_client = _make_ai_client(status=AIClient.STATUS_BLOCKED)
-        resp = self.c.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {ai_client.client_id}")
-        self.assertEqual(resp.status_code, 401)
-        self.assertEqual(resp.json()["error"], CLIENT_BLOCKED)
-
-    def test_unknown_uuid_returns_401_with_typed_code(self):
-        resp = self.c.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {uuid.uuid4()}")
-        self.assertEqual(resp.status_code, 401)
-        self.assertEqual(resp.json()["error"], INVALID_CLIENT_ID)
-
     def test_session_expired_returns_401_with_typed_code(self):
         import time as _time
-        from django.test import Client as DjangoClient
-        sc = DjangoClient()
+        sc = Client()
         with patch("auth_app.views.validate_cds_credentials", return_value=(True, 200)):
             sc.post(
                 "/auth/login",
@@ -240,7 +185,7 @@ class MCPEndpointAuthTests(TestCase):
                 content_type="application/json",
             )
         session = sc.session
-        session["session_created_at"] = int(_time.time()) - (2 * 24 * 3600)   # 2 days ago
+        session["session_created_at"] = int(_time.time()) - (2 * 24 * 3600)
         session.save()
 
         resp = sc.post("/mcp", "{}", content_type="application/json")

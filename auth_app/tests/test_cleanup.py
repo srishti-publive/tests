@@ -67,32 +67,11 @@ class CleanupExpiredTokensTests(TestCase):
         self._run()
         self.assertEqual(OAuthToken.objects.count(), 1)
 
-    def test_deletes_expired_clients_with_expires_at(self):
-        OAuthClient.objects.create(
-            client_id="expired_client",
-            redirect_uris=[],
-            expires_at=_past(),
-        )
+    def test_clients_are_never_deleted(self):
+        """OAuthClient registrations are permanent — cleanup never touches them."""
+        OAuthClient.objects.create(client_id="permanent_client")
         self._run()
-        self.assertFalse(OAuthClient.objects.filter(client_id="expired_client").exists())
-
-    def test_keeps_clients_without_expires_at(self):
-        OAuthClient.objects.create(
-            client_id="no_expiry_client",
-            redirect_uris=[],
-            expires_at=None,
-        )
-        self._run()
-        self.assertTrue(OAuthClient.objects.filter(client_id="no_expiry_client").exists())
-
-    def test_keeps_unexpired_clients(self):
-        OAuthClient.objects.create(
-            client_id="valid_client",
-            redirect_uris=[],
-            expires_at=_future(days=90),
-        )
-        self._run()
-        self.assertTrue(OAuthClient.objects.filter(client_id="valid_client").exists())
+        self.assertTrue(OAuthClient.objects.filter(client_id="permanent_client").exists())
 
     def test_mixed_records_only_deletes_expired(self):
         OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="a", credentials={}, expires_at=_past())
@@ -111,3 +90,4 @@ class CleanupExpiredTokensTests(TestCase):
         output = self._run()
         self.assertIn("1 expired code", output)
         self.assertIn("1 expired token", output)
+        self.assertNotIn("client", output.lower().split("cleaned")[1] if "cleaned" in output.lower() else "")
