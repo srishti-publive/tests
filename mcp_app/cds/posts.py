@@ -83,28 +83,11 @@ SCHEMAS = [
         },
     },
     {
-        "name": "fetch_livebupdates",
-        "description": (
-            "Get published live blog updates for a LiveBlog post. "
-            "If the user needs to add, edit, or delete update entries, use the CMS live blog update tools instead."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "required": ["post_id"],
-            "properties": {
-                "post_id": {"type": "integer", "description": "LiveBlog post ID"},
-                "page":    {"type": "integer"},
-                "limit":   {"type": "integer"},
-            },
-        },
-    },
-    {
         "name": "fetch_liveblog_with_updates",
         "description": (
             "Get a LiveBlog post and all its published update entries in a single call. "
             "Returns the full post object alongside a paginated list of updates. "
-            "Only works for posts with type LiveBlog — returns an error for any other post type. "
-            "If the user only needs the update entries without post metadata, use fetch_livebupdates instead."
+            "Only works for posts with type LiveBlog — returns an error for any other post type."
         ),
         "inputSchema": {
             "type": "object",
@@ -179,13 +162,6 @@ def fetch_post_by_url(credentials: dict, args: dict):
     return cds_get(credentials, "/post/", {"legacy_url": legacy_url})
 
 
-def fetch_livebupdates(credentials: dict, args: dict):
-    return cds_get(credentials, f"/post/{args['post_id']}/live-blog-updates/", {
-        "page":  args.get("page"),
-        "limit": args.get("limit"),
-    })
-
-
 def fetch_liveblog_with_updates(credentials: dict, args: dict):
     post_id = args["post_id"]
     post    = cds_get(credentials, f"/post/{post_id}/")
@@ -220,7 +196,6 @@ HANDLERS = {
     "fetch_published_posts":       fetch_published_posts,
     "fetch_published_post":        fetch_published_post,
     "fetch_post_by_url":           fetch_post_by_url,
-    "fetch_livebupdates":          fetch_livebupdates,
     "fetch_liveblog_with_updates": fetch_liveblog_with_updates,
     "fetch_trending_posts":        fetch_trending_posts,
 }

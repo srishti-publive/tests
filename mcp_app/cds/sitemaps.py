@@ -1,69 +1,60 @@
 """CDS sitemap tools — return XML wrapped in the standard CDS JSON envelope."""
 from ..clients.cds import cds_get
 
+_SITEMAP_PATHS = {
+    "index":       "/sitemap/allcontent-sitemap.xml/",
+    "web_index":   "/sitemap/webcontent-sitemap.xml/",
+    "web_stories": "/sitemap/webstory-sitemap.xml/",
+    "news":        "/sitemap/news-sitemap.xml/",
+    "categories":  "/sitemap/category-sitemap.xml/",
+}
+
 SCHEMAS = [
     {
-        "name": "fetch_sitemap_index",
-        "description": "Get the master sitemap XML index for all published content. Returns a sitemapindex linking to every category, tag, and content sitemap.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "fetch_sitemap_web_index",
-        "description": "Get the web content sitemap XML index linking to paginated article sitemaps (sitemap_{date}.xml).",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "fetch_sitemap_web_stories",
-        "description": "Get the web story sitemap XML index linking to paginated web story sitemaps (webstory_sitemap_{date}.xml).",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "fetch_sitemap_news",
-        "description": "Get the Google News sitemap XML containing recently published articles eligible for Google News indexing.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "fetch_sitemap_categories",
-        "description": "Get the sitemap XML listing all published category pages.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "name": "fetch_sitemap",
+        "description": (
+            "Get a sitemap XML file by type. "
+            "Use 'index' for the master sitemapindex linking all content. "
+            "Use 'web_index' for the paginated article sitemap index (lists dates for fetch_sitemap_page). "
+            "Use 'web_stories' for the web story sitemap index. "
+            "Use 'news' for the Google News sitemap. "
+            "Use 'categories' for the categories sitemap."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["index", "web_index", "web_stories", "news", "categories"],
+                    "description": "Which sitemap to fetch",
+                },
+            },
+        },
     },
     {
         "name": "fetch_sitemap_page",
         "description": (
             "Get a paginated date-stamped sitemap — either an article sitemap (sitemap_{date}.xml) "
             "or a web story sitemap (webstory_sitemap_{date}.xml). "
-            "Discover valid date values from fetch_sitemap_web_index or fetch_sitemap_web_stories first."
+            "Discover valid date values from fetch_sitemap(type='web_index') or fetch_sitemap(type='web_stories') first."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["date"],
             "properties": {
-                "date":  {"type": "string",  "description": "Date partition string (e.g. 2026-05-01) from the webcontent or webstory sitemap index"},
-                "type":  {"type": "string",  "description": "Sitemap type: article (default) or webstory"},
+                "date": {"type": "string", "description": "Date partition string (e.g. 2026-05-01) from the web_index or web_stories sitemap"},
+                "type": {"type": "string", "description": "Sitemap type: article (default) or webstory"},
             },
         },
     },
 ]
 
 
-def fetch_sitemap_index(credentials: dict, args: dict):
-    return cds_get(credentials, "/sitemap/allcontent-sitemap.xml/")
-
-
-def fetch_sitemap_web_index(credentials: dict, args: dict):
-    return cds_get(credentials, "/sitemap/webcontent-sitemap.xml/")
-
-
-def fetch_sitemap_web_stories(credentials: dict, args: dict):
-    return cds_get(credentials, "/sitemap/webstory-sitemap.xml/")
-
-
-def fetch_sitemap_news(credentials: dict, args: dict):
-    return cds_get(credentials, "/sitemap/news-sitemap.xml/")
-
-
-def fetch_sitemap_categories(credentials: dict, args: dict):
-    return cds_get(credentials, "/sitemap/category-sitemap.xml/")
+def fetch_sitemap(credentials: dict, args: dict):
+    sitemap_type = args["type"]
+    path = _SITEMAP_PATHS[sitemap_type]
+    return cds_get(credentials, path)
 
 
 def fetch_sitemap_page(credentials: dict, args: dict):
@@ -77,10 +68,6 @@ def fetch_sitemap_page(credentials: dict, args: dict):
 
 
 HANDLERS = {
-    "fetch_sitemap_index":       fetch_sitemap_index,
-    "fetch_sitemap_web_index":   fetch_sitemap_web_index,
-    "fetch_sitemap_web_stories": fetch_sitemap_web_stories,
-    "fetch_sitemap_news":        fetch_sitemap_news,
-    "fetch_sitemap_categories":  fetch_sitemap_categories,
-    "fetch_sitemap_page":        fetch_sitemap_page,
+    "fetch_sitemap":      fetch_sitemap,
+    "fetch_sitemap_page": fetch_sitemap_page,
 }
