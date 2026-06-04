@@ -44,8 +44,9 @@ SCHEMAS = [
             "If the user has not provided an author ID, call fetch_authors first to get one, then ask the user to confirm. "
             "english_title must be plain English text matching the title, NOT a pre-slugified string. "
             "TYPE-SPECIFIC REQUIREMENTS — do NOT attempt to create these without the noted fields: "
-            "Video: requires meta_video_url (video page URL) and meta_video_embed (iframe embed code). "
-            "Web Story: requires AMP story slide markup in the content field AND meta_landscape_thumbnail (media ID). "
+            "Video: the CMS API rejects meta_video_embed regardless of the value passed (known upstream bug). "
+            "Create an empty Video draft via the Publive dashboard first, then use update_post to set title, content, tags, and other mutable fields. "
+            "Web Story: requires AMP story slide markup in the content field AND meta_landscape_thumbnail (landscape image path string from the Publive media library, e.g. 'publisher/media/image.jpg'). "
             "Gallery: requires gallery image data in content or custom_entity, and after_para (integer, default 0). "
             "Article, LiveBlog, CustomPage, BlankPage: no extra required fields beyond the six standard ones. "
             "DRAFT posts (status=Draft): created immediately — no preview step. "
@@ -75,9 +76,9 @@ SCHEMAS = [
                 "hide_banner_image":   {"type": "boolean", "description": "Hide the featured image on the post"},
                 "custom_published_at":      {"type": "string",  "description": "Backdated publish timestamp ISO 8601. Immutable after creation."},
                 "meta_video_url":           {"type": "string",  "description": "Video post only — URL of the video page (e.g. YouTube/Vimeo URL). Merged into meta_data. Immutable after creation."},
-                "meta_video_embed":         {"type": "string",  "description": "Video post only — iframe embed code for the video. Merged into meta_data. Immutable after creation."},
-                "meta_landscape_thumbnail": {"type": "integer", "description": "Web Story only — media ID for the landscape thumbnail. Merged into meta_data. Immutable after creation."},
-                "after_para":              {"type": "integer", "description": "Gallery/Article — paragraph position for injecting content (default 0)."},
+                "meta_video_embed":         {"type": "string",  "description": "Video post only — raw iframe embed HTML. NOTE: the CMS API currently rejects this field during creation (known upstream validator bug — rejects both iframe strings and media IDs). Create Video posts via the Publive dashboard instead, then use update_post for mutable fields."},
+                "meta_landscape_thumbnail": {"type": "string",  "description": "Web Story only — landscape image path string from the Publive media library (e.g. 'publisher/media/image.jpg'). Retrieve the path from a media asset via get_media_asset or list_media_assets. Merged into meta_data. Immutable after creation."},
+                "after_para":              {"type": "integer", "description": "Gallery/Article — paragraph position for injecting content. Defaults to 0 automatically for both Gallery and Article posts if not provided (the CMS requires it but has no default of its own)."},
                 "meta_data":               {"type": "object",  "description": "Arbitrary key-value metadata (e.g. access_type). Merged with any type-specific meta fields above. Immutable after creation."},
                 "dry_run":                 {"type": "boolean", "description": "true = preview only, no changes (default); false = create for real"},
             },
@@ -149,6 +150,31 @@ def _strip_list_brackets(payload: dict) -> None:
             payload[field] = payload[field].strip("[]")
 
 
+def _remap_post_type_error(result: dict, post_type: str) -> dict:
+    """Translate the CMS's opaque type-validation bad_request into an actionable message.
+
+    The CMS returns 'Invalid value for key : type' when a post type is not enabled
+    for the publisher (e.g. BlankPage is a publisher-gated feature). The raw message
+    gives no context on which type failed or how to fix it.
+    """
+    if not (
+        isinstance(result, dict)
+        and result.get("error_type") == "bad_request"
+        and "invalid value" in result.get("message", "").lower()
+        and "type" in result.get("message", "").lower()
+    ):
+        return result
+    return {
+        "error_type": "bad_request",
+        "message": (
+            f"Post type '{post_type}' is not enabled for this publisher. "
+            "Contact Publive support to have it activated, or use one of the "
+            "standard types: Article, Video, Web Story, Gallery, LiveBlog, CustomPage."
+        ),
+        "retryable": False,
+    }
+
+
 def list_editorial_posts(credentials: dict, args: dict):
     return cms_get(credentials, "/post/", {"page": args.get("page"), "limit": args.get("limit")})
 
@@ -181,25 +207,29 @@ def create_post(credentials: dict, args: dict):
 
     post_type = payload.get("type", "")
     if post_type == "Video":
-        meta = payload.get("meta_data") or {}
-        if not meta.get("meta_video_url") or not meta.get("meta_video_embed"):
-            return {
-                "error_type": "missing_required_field",
-                "message": (
-                    "Video posts require meta_video_url (video page URL) and meta_video_embed (iframe embed code). "
-                    "Pass them as top-level parameters — they will be stored in meta_data."
-                ),
-                "retryable": False,
-            }
+        # The CMS API validator rejects meta_video_embed regardless of the value passed
+        # (both iframe HTML strings and valid media IDs fail with "must be a valid publive media ID").
+        # Existing Video posts were created via the dashboard which bypasses this validator.
+        # Block early and guide the user to the dashboard-first workaround.
+        return {
+            "error_type": "unsupported_operation",
+            "message": (
+                "Video posts cannot be created directly via the CMS API. "
+                "The CMS backend rejects the meta_video_embed field regardless of the value passed "
+                "(known upstream validator bug — affects both iframe strings and media IDs). "
+                "Workaround: create an empty Video draft via the Publive dashboard, "
+                "then use update_post to set the title, content, tags, contributors, and other mutable fields."
+            ),
+            "retryable": False,
+        }
 
     if post_type == "Web Story" and not payload.get("content") and not payload.get("custom_entity"):
         return {
             "error_type": "missing_required_field",
             "message": (
-                "Web Story posts require AMP story slide content in the 'content' field "
-                "and meta_landscape_thumbnail (a media ID). "
-                "Create an empty Web Story draft via the Publive dashboard first, "
-                "then use update_post to update other fields programmatically."
+                "Web Story posts require AMP story slide markup in the 'content' field "
+                "and a landscape thumbnail path string in 'meta_landscape_thumbnail' "
+                "(e.g. 'publisher/media/image.jpg' — retrieve it from list_media_assets or get_media_asset)."
             ),
             "retryable": False,
         }
@@ -207,8 +237,10 @@ def create_post(credentials: dict, args: dict):
         return {
             "error_type": "missing_required_field",
             "message": (
-                "Web Story posts require meta_landscape_thumbnail (a Publive media ID). "
-                "Pass it as a top-level parameter — it will be stored in meta_data."
+                "Web Story posts require meta_landscape_thumbnail — a landscape image path string "
+                "from the Publive media library (e.g. 'publisher/media/image.jpg'). "
+                "Call list_media_assets or get_media_asset to find the 'path' field of an image asset, "
+                "then pass that path string as meta_landscape_thumbnail."
             ),
             "retryable": False,
         }
@@ -223,14 +255,14 @@ def create_post(credentials: dict, args: dict):
             "retryable": False,
         }
 
-    if post_type == "Article":
+    if post_type in ("Article", "Gallery"):
         payload.setdefault("after_para", 0)
 
     _coerce_post_int_fields(payload)
     _strip_list_brackets(payload)
 
     if payload.get("status") == "Draft":
-        return cms_post(credentials, "/post/", payload)
+        return _remap_post_type_error(cms_post(credentials, "/post/", payload), post_type)
 
     if dry_run:
         return {"dry_run": True, "preview": preview_create_op("Post", payload)}
@@ -240,7 +272,7 @@ def create_post(credentials: dict, args: dict):
     intended_status = payload["status"]
     draft_payload = {**payload, "status": "Draft"}
 
-    result = cms_post(credentials, "/post/", draft_payload)
+    result = _remap_post_type_error(cms_post(credentials, "/post/", draft_payload), post_type)
 
     if (
         isinstance(result, dict)
