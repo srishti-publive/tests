@@ -1,9 +1,7 @@
 import json
-from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase, Client
-from django.utils import timezone
+from django.test import Client, TestCase
 
 from auth_app.services import get_session_credentials
 

@@ -1,6 +1,8 @@
+import contextlib
 import logging
 
-from ..clients.cms import cms_delete, cms_get, cms_patch, cms_post
+from mcp_app.clients.cms import cms_delete, cms_get, cms_patch, cms_post
+
 from .helpers import DELETION_REQUIRES_CONFIRMATION, preview_create_op, preview_delete_op, preview_update_op
 
 logger = logging.getLogger(__name__)
@@ -138,10 +140,8 @@ SCHEMAS = [
 def _coerce_post_int_fields(payload: dict) -> None:
     for field in ("primary_category", "banner_url", "after_para"):
         if field in payload:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 payload[field] = int(payload[field])
-            except (ValueError, TypeError):
-                pass
 
 
 def _strip_list_brackets(payload: dict) -> None:

@@ -3,8 +3,8 @@ import logging
 
 import newrelic.agent
 
-from ..clients.cds import cds_get
-from ..nr_utils import add_attrs
+from mcp_app.clients.cds import cds_get
+from mcp_app.nr_utils import add_attrs
 
 logger = logging.getLogger(__name__)
 

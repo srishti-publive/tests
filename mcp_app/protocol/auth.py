@@ -57,8 +57,8 @@ def _resolve_oauth_token(token_value: str):
         oauth_token = OAuthToken.objects.get(token=token_value)
         return oauth_token.credentials, None, None
     except Exception as exc:  # noqa: BLE001
-        from auth_app.models import OAuthToken as _OT
-        if not isinstance(exc, _OT.DoesNotExist):
+        from auth_app.models import OAuthToken as _OAuthToken
+        if not isinstance(exc, _OAuthToken.DoesNotExist):
             logger.error("resolve_credentials: unexpected OAuthToken lookup failure", exc_info=True)
             raise
     return None, None, None

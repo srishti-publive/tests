@@ -1,5 +1,5 @@
 """CDS sitemap tools — return XML wrapped in the standard CDS JSON envelope."""
-from ..clients.cds import cds_get
+from mcp_app.clients.cds import cds_get
 
 _SITEMAP_PATHS = {
     "index":       "/sitemap/allcontent-sitemap.xml/",

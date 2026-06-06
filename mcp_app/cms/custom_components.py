@@ -1,6 +1,7 @@
 import logging
 
-from ..clients.cms import cms_delete, cms_get, cms_patch, cms_post
+from mcp_app.clients.cms import cms_delete, cms_get, cms_patch, cms_post
+
 from .helpers import DELETION_REQUIRES_CONFIRMATION, preview_create_op, preview_delete_op, preview_update_op
 
 logger = logging.getLogger(__name__)

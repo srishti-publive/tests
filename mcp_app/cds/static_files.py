@@ -1,5 +1,5 @@
 """CDS static file tools — publisher-specific files served from S3."""
-from ..clients.cds import cds_get
+from mcp_app.clients.cds import cds_get
 
 SCHEMAS = [
     {

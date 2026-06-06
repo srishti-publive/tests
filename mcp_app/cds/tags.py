@@ -1,4 +1,4 @@
-from ..clients.cds import cds_get
+from mcp_app.clients.cds import cds_get
 
 SCHEMAS = [
     {

@@ -4,14 +4,16 @@ Covers GET / POST / PATCH / DELETE.  No automatic retry (write operations are no
 All error paths return a normalised error dict instead of raising so callers can inspect the
 error_type and decide whether to surface a message or propagate.
 """
+import json
 import logging
 import time
 
 import newrelic.agent
 import requests
 
-from ..nr_utils import add_attrs, notice_err, record_metric
-from .shared import build_base_url, build_basic_auth_headers, slugify_url_path
+from mcp_app.nr_utils import add_attrs, notice_err, record_metric
+
+from .shared import build_base_url, build_basic_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ def normalize_cms_error(exc, url: str) -> dict:
                         field_errors.append(f"{key}: {val}")
                 if field_errors:
                     msg = "Validation error — " + "; ".join(field_errors)
-        except Exception:
+        except (ValueError, json.JSONDecodeError, AttributeError, KeyError):
             pass
         logger.warning("cms_client 4xx: url=%s status=%d raw_body=%s", url, http_status, raw_body)
         return {"error_type": "bad_request", "message": msg, "raw_api_response": raw_body, "retryable": False}

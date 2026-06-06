@@ -3,12 +3,12 @@ import json
 import logging
 import threading
 
-import newrelic.agent
 from django.http import HttpResponse, JsonResponse
+import newrelic.agent
 
-from ..nr_utils          import add_attrs, notice_err
-from ..protocol.dispatch import dispatch_jsonrpc
-from ..protocol.session  import SESSION_PROTOCOL_KEY, derive_session_id
+from mcp_app.nr_utils import add_attrs, notice_err
+from mcp_app.protocol.dispatch import dispatch_jsonrpc
+from mcp_app.protocol.session import SESSION_PROTOCOL_KEY, derive_session_id
 
 logger = logging.getLogger(__name__)
 

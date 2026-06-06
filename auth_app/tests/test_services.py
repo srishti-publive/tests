@@ -1,13 +1,12 @@
 import json
-from unittest.mock import MagicMock
 
-from django.test import TestCase, RequestFactory, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 
 from auth_app.services import (
     check_origin,
-    validate_redirect_uris,
-    redirect_uri_is_registered,
     parse_oauth_token_body,
+    redirect_uri_is_registered,
+    validate_redirect_uris,
 )
 
 

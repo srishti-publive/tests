@@ -5,15 +5,24 @@ import threading
 
 import newrelic.agent
 
-from ..nr_utils            import add_attrs, fn_trace, notice_err
-from .categories           import HANDLERS as _CAT_H,    SCHEMAS as _CAT_S
-from .custom_components    import HANDLERS as _CC_H,     SCHEMAS as _CC_S
-from .custom_content_types import HANDLERS as _CCT_H,    SCHEMAS as _CCT_S
-from .live_blog            import HANDLERS as _LB_H,     SCHEMAS as _LB_S
-from .media                import HANDLERS as _MEDIA_H,  SCHEMAS as _MEDIA_S
-from .posts                import HANDLERS as _POSTS_H,  SCHEMAS as _POSTS_S
-from .tags                 import HANDLERS as _TAGS_H,   SCHEMAS as _TAGS_S
-from .validators           import HANDLERS as _VAL_H,    SCHEMAS as _VAL_S
+from mcp_app.nr_utils import add_attrs, fn_trace, notice_err
+
+from .categories import HANDLERS as _CAT_H
+from .categories import SCHEMAS as _CAT_S
+from .custom_components import HANDLERS as _CC_H
+from .custom_components import SCHEMAS as _CC_S
+from .custom_content_types import HANDLERS as _CCT_H
+from .custom_content_types import SCHEMAS as _CCT_S
+from .live_blog import HANDLERS as _LB_H
+from .live_blog import SCHEMAS as _LB_S
+from .media import HANDLERS as _MEDIA_H
+from .media import SCHEMAS as _MEDIA_S
+from .posts import HANDLERS as _POSTS_H
+from .posts import SCHEMAS as _POSTS_S
+from .tags import HANDLERS as _TAGS_H
+from .tags import SCHEMAS as _TAGS_S
+from .validators import HANDLERS as _VAL_H
+from .validators import SCHEMAS as _VAL_S
 
 logger = logging.getLogger(__name__)
 

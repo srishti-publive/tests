@@ -1,12 +1,12 @@
 import base64
+from datetime import timedelta
 import hashlib
 import json
 import secrets
-from datetime import timedelta
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from django.test import TestCase, Client, override_settings
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from auth_app.models import OAuthClient, OAuthCode, OAuthToken

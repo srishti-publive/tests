@@ -8,7 +8,7 @@ calls are made. Tests verify:
   - publish requires confirm_publish=true
   - missing required fields return structured errors, not exceptions
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from django.test import TestCase
 
@@ -72,7 +72,7 @@ class CreatePostTests(TestCase):
     @patch("mcp_app.cms.posts.cms_post", return_value={"data": {"id": 7, "status": "Draft"}})
     @patch("mcp_app.cms.posts.cms_patch", return_value={"data": {"id": 7, "status": "Published"}})
     def test_published_with_dry_run_false_calls_post_then_patch(self, mock_patch, mock_post):
-        result = self._call({"status": "Published", "dry_run": False})
+        _ = self._call({"status": "Published", "dry_run": False})
         mock_post.assert_called_once()
         mock_patch.assert_called_once()
 
@@ -99,7 +99,7 @@ class UpdatePostTests(TestCase):
 
     @patch("mcp_app.cms.posts.cms_patch", return_value={"data": {"id": 99}})
     def test_draft_update_skips_dry_run(self, mock_patch):
-        result = self._call({"id": 99, "status": "Draft"})
+        _ = self._call({"id": 99, "status": "Draft"})
         mock_patch.assert_called_once_with(CREDS, "/post/99/", {"status": "Draft"})
 
     def test_publish_without_confirm_returns_error(self):
@@ -108,7 +108,7 @@ class UpdatePostTests(TestCase):
 
     @patch("mcp_app.cms.posts.cms_patch", return_value={"data": {"id": 99, "status": "Published"}})
     def test_publish_with_confirm_publishes(self, mock_patch):
-        result = self._call({"id": 99, "status": "Published", "dry_run": False, "confirm_publish": True})
+        _ = self._call({"id": 99, "status": "Published", "dry_run": False, "confirm_publish": True})
         mock_patch.assert_called_once()
 
 
@@ -129,7 +129,7 @@ class DeletePostTests(TestCase):
 
     @patch("mcp_app.cms.posts.cms_delete", return_value={"deleted": True})
     def test_dry_run_false_with_confirm_deletes(self, mock_delete):
-        result = self._call({"id": 99, "dry_run": False, "confirm_delete": True})
+        _ = self._call({"id": 99, "dry_run": False, "confirm_delete": True})
         mock_delete.assert_called_once_with(CREDS, "/post/99/")
 
 

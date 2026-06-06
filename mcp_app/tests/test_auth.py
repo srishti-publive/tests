@@ -2,8 +2,7 @@ import json
 import secrets
 from unittest.mock import patch
 
-from django.test import TestCase, Client, RequestFactory
-from django.utils import timezone
+from django.test import Client, RequestFactory, TestCase
 
 from auth_app.models import OAuthToken
 from mcp_app.protocol.auth import (

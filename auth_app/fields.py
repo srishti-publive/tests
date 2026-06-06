@@ -8,7 +8,7 @@ import json
 
 from django.db import models
 
-from .crypto import decrypt_json, encrypt_json
+from .crypto import InvalidToken, decrypt_json, encrypt_json
 
 
 class EncryptedJSONField(models.TextField):
@@ -24,7 +24,7 @@ class EncryptedJSONField(models.TextField):
             return value
         try:
             return decrypt_json(value)
-        except Exception:
+        except (InvalidToken, json.JSONDecodeError):
             # Migration-window fallback: treat as legacy plaintext JSON
             return json.loads(value)
 

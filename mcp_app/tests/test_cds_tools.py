@@ -5,7 +5,7 @@ All tests mock cds_get so no real HTTP calls are made. Each test verifies:
   - the handler returns the upstream response unchanged
   - edge-case branches (empty legacy_url, timeout fallback, wrong post type) behave correctly
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from django.test import TestCase
 

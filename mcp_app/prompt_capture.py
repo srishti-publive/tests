@@ -12,8 +12,8 @@ Clients can send prompts via (first match wins):
 from __future__ import annotations
 
 import json
+from typing import Optional
 import uuid
-from typing import Optional, Tuple
 
 import newrelic.agent
 
@@ -38,7 +38,7 @@ def _truncate(text: str) -> str:
     return text[: MAX_PROMPT_LEN - 3] + "..."
 
 
-def _prompt_from_meta(meta) -> Optional[Tuple[str, str]]:
+def _prompt_from_meta(meta) -> Optional[tuple[str, str]]:
     if not isinstance(meta, dict):
         return None
     for key in _META_PROMPT_KEYS:

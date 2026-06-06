@@ -2,13 +2,15 @@
 
 Read-only. Retries once on transient failures (timeout, HTTP 408).
 """
+import json
 import logging
 import time
 
 import newrelic.agent
 import requests
 
-from ..nr_utils import add_attrs, notice_err, set_txn_name
+from mcp_app.nr_utils import add_attrs, notice_err, set_txn_name
+
 from .shared import build_base_url, build_basic_auth_headers, slugify_url_path
 
 logger = logging.getLogger(__name__)
@@ -80,7 +82,7 @@ def cds_get(credentials: dict, path: str, params=None):
                 try:
                     data = resp.json()
                     msg  = data.get("detail") or data.get("message") or f"HTTP {resp.status_code}"
-                except Exception:
+                except (ValueError, json.JSONDecodeError):
                     msg = f"HTTP {resp.status_code}"
                 exc          = Exception(f"{msg} [url={url}]")
                 exc.response = resp  # type: ignore[attr-defined]
@@ -116,7 +118,7 @@ def cds_get(credentials: dict, path: str, params=None):
                 continue
             break
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — catch-all to break retry loop on unexpected errors
             last_exc = exc
             break
 

@@ -5,15 +5,24 @@ import threading
 
 import newrelic.agent
 
-from ..nr_utils    import add_attrs, fn_trace, notice_err
-from .authors      import HANDLERS as _AUTHORS_HANDLERS,    SCHEMAS as _AUTHORS_SCHEMAS
-from .categories   import HANDLERS as _CATEGORIES_HANDLERS, SCHEMAS as _CATEGORIES_SCHEMAS
-from .content      import HANDLERS as _CONTENT_HANDLERS,    SCHEMAS as _CONTENT_SCHEMAS
-from .posts        import HANDLERS as _POSTS_HANDLERS,      SCHEMAS as _POSTS_SCHEMAS
-from .publisher    import HANDLERS as _PUBLISHER_HANDLERS,  SCHEMAS as _PUBLISHER_SCHEMAS
-from .sitemaps     import HANDLERS as _SITEMAPS_HANDLERS,   SCHEMAS as _SITEMAPS_SCHEMAS
-from .static_files import HANDLERS as _STATIC_HANDLERS,     SCHEMAS as _STATIC_SCHEMAS
-from .tags         import HANDLERS as _TAGS_HANDLERS,        SCHEMAS as _TAGS_SCHEMAS
+from mcp_app.nr_utils import add_attrs, fn_trace, notice_err
+
+from .authors import HANDLERS as _AUTHORS_HANDLERS
+from .authors import SCHEMAS as _AUTHORS_SCHEMAS
+from .categories import HANDLERS as _CATEGORIES_HANDLERS
+from .categories import SCHEMAS as _CATEGORIES_SCHEMAS
+from .content import HANDLERS as _CONTENT_HANDLERS
+from .content import SCHEMAS as _CONTENT_SCHEMAS
+from .posts import HANDLERS as _POSTS_HANDLERS
+from .posts import SCHEMAS as _POSTS_SCHEMAS
+from .publisher import HANDLERS as _PUBLISHER_HANDLERS
+from .publisher import SCHEMAS as _PUBLISHER_SCHEMAS
+from .sitemaps import HANDLERS as _SITEMAPS_HANDLERS
+from .sitemaps import SCHEMAS as _SITEMAPS_SCHEMAS
+from .static_files import HANDLERS as _STATIC_HANDLERS
+from .static_files import SCHEMAS as _STATIC_SCHEMAS
+from .tags import HANDLERS as _TAGS_HANDLERS
+from .tags import SCHEMAS as _TAGS_SCHEMAS
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 """Session ID derivation and MCPPrompt event rate-limiting."""
 import hashlib
-import time
 import threading
+import time
 import uuid
 
 SESSION_PROTOCOL_KEY = "mcp_protocol_version"

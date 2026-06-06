@@ -1,5 +1,5 @@
 """Shared helpers for all CMS write tools: preview formatters and write guards."""
-from ..clients.cms import cms_get
+from mcp_app.clients.cms import cms_get
 
 # Returned by every delete handler when the caller hasn't passed both
 # dry_run=false and confirm_delete=true.

@@ -5,15 +5,15 @@ No business logic lives here.
 """
 import logging
 
-import newrelic.agent
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+import newrelic.agent
 
-from .nr_utils           import suppress_apdex, suppress_trace
-from .protocol.auth      import build_unauthorized_response, identify_mcp_client, resolve_credentials
-from .protocol.dispatch  import PROTOCOL_VERSION
-from .transport.http     import handle_http_request
-from .transport.sse      import handle_sse_message, open_sse_connection
+from .nr_utils import suppress_apdex, suppress_trace
+from .protocol.auth import build_unauthorized_response, identify_mcp_client, resolve_credentials
+from .protocol.dispatch import PROTOCOL_VERSION
+from .transport.http import handle_http_request
+from .transport.sse import handle_sse_message, open_sse_connection
 
 logger = logging.getLogger(__name__)
 

@@ -3,17 +3,20 @@ import json
 import logging
 import time
 
-import newrelic.agent
-import requests
-
-from ..cds          import TOOLS,          dispatch_cds_tool
-from ..cms          import CMS_TOOL_NAMES, CMS_TOOLS, dispatch_cms_tool
-from ..nr_utils     import (
-    SERVER_ENV, SERVER_VERSION,
-    add_attrs, get_linking_metadata, record_event, record_metric, set_txn_name,
+from mcp_app.cds import TOOLS, dispatch_cds_tool
+from mcp_app.cms import CMS_TOOL_NAMES, CMS_TOOLS, dispatch_cms_tool
+from mcp_app.nr_utils import (
+    SERVER_ENV,
+    SERVER_VERSION,
+    add_attrs,
+    get_linking_metadata,
+    record_event,
+    record_metric,
+    set_txn_name,
 )
-from ..prompt_capture import extract_prompt_for_tool_call, record_prompt_observability
-from .session       import SESSION_PROTOCOL_KEY, should_emit_prompt_event
+from mcp_app.prompt_capture import extract_prompt_for_tool_call, record_prompt_observability
+
+from .session import SESSION_PROTOCOL_KEY, should_emit_prompt_event
 from .session_store import session_stats, session_stats_lock
 
 logger = logging.getLogger(__name__)

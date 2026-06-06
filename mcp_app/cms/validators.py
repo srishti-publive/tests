@@ -1,6 +1,6 @@
 """Read-only pre-flight validation tools — no CMS writes."""
-from ..clients.cds import cds_get
-from ..clients.cms import cms_get
+from mcp_app.clients.cds import cds_get
+from mcp_app.clients.cms import cms_get
 
 SCHEMAS = [
     {

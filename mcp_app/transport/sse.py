@@ -12,18 +12,24 @@ import threading
 import time
 import uuid
 
-import newrelic.agent
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+import newrelic.agent
 
-from ..nr_utils import (
-    SERVER_ENV, SERVER_VERSION,
-    add_attrs, get_linking_metadata, record_event, record_metric,
-    set_txn_name, suppress_apdex, suppress_trace,
+from mcp_app.nr_utils import (
+    SERVER_ENV,
+    SERVER_VERSION,
+    add_attrs,
+    get_linking_metadata,
+    record_event,
+    record_metric,
+    set_txn_name,
+    suppress_apdex,
+    suppress_trace,
 )
-from ..protocol.auth     import identify_mcp_client
-from ..protocol.dispatch import dispatch_jsonrpc
-from ..protocol.session  import SESSION_PROTOCOL_KEY, derive_session_id
-from ..protocol.session_store import session_stats, session_stats_lock
+from mcp_app.protocol.auth import identify_mcp_client
+from mcp_app.protocol.dispatch import dispatch_jsonrpc
+from mcp_app.protocol.session import SESSION_PROTOCOL_KEY
+from mcp_app.protocol.session_store import session_stats, session_stats_lock
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +305,6 @@ def handle_sse_message(request) -> HttpResponse:
             newrelic.agent.record_custom_metric("Custom/MCP/session_queue_depth", queue_depth)
 
         return JsonResponse({"ok": True})
-    except Exception as exc:
+    except Exception:
         logger.error("handle_sse_message transport error: session=%s", session_id, exc_info=True)
         raise

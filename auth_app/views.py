@@ -1,15 +1,13 @@
 # Responsibility: HTTP view handlers for OAuth 2.0 PKCE flow and session-based auth.
 import base64
+from datetime import timedelta
 import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime, timedelta
-from typing import Optional, Union
+from typing import Optional
 from urllib.parse import urlencode
 
-import newrelic.agent
-import requests
 from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -17,6 +15,8 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+import newrelic.agent
+import requests
 
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 
@@ -26,8 +26,8 @@ from .services import (
     check_session_ttl,
     get_allowed_redirect_uris,
     get_session_credentials,
-    set_session_credentials,
     parse_oauth_token_body,
+    set_session_credentials,
     validate_cds_credentials,
 )
 
@@ -78,7 +78,7 @@ def oauth_register(request: HttpRequest) -> JsonResponse:
 
     try:
         body = json.loads(request.body)
-    except Exception:
+    except json.JSONDecodeError:
         body = {}
 
     # Accept either redirect_uris (list, legacy) or redirect_uri (string).

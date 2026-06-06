@@ -5,8 +5,8 @@ SecurityHeadersMiddleware — CSP + X-Frame-Options + nosniff on every HTML resp
 """
 import logging
 import time
+from typing import Optional
 import uuid
-from typing import List, Optional, Tuple
 
 from django.conf import settings
 from django.core.cache import cache
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # (path_prefix, http_method_or_None, limit, window_seconds, id_strategy)
 # method=None matches any HTTP method.
-_RULES: List[Tuple[str, Optional[str], int, int, str]] = [
+_RULES: list[tuple[str, Optional[str], int, int, str]] = [
     ("/auth/login",  "POST", 10,  60, "ip"),     # login brute-force
     ("/register",    "POST", 20,  60, "ip"),      # client registration
     ("/authorize",   None,   20,  60, "ip"),      # OAuth authorize
@@ -87,7 +87,7 @@ class RateLimitMiddleware:
                 # Increment; TTL is 2× window so the key outlives the window slot
                 cache.set(cache_key, count + 1, timeout=window * 2)
 
-            except Exception:
+            except Exception:  # noqa: BLE001 — fail open; cache backend can raise arbitrary errors
                 # Fail open — never block traffic because of a cache outage
                 logger.warning("rate_limit cache error for path=%s — failing open", path, exc_info=True)
 

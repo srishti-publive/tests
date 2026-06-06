@@ -1,5 +1,5 @@
 """CDS read tools for content metadata: types, ad slots, forms, and URL identification."""
-from ..clients.cds import cds_get
+from mcp_app.clients.cds import cds_get
 
 SCHEMAS = [
     {

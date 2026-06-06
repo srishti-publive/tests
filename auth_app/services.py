@@ -5,15 +5,13 @@ import base64
 import json
 import logging
 import time
-from datetime import datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import parse_qs
 
-import newrelic.agent
-import requests
 from django.conf import settings
 from django.http import HttpRequest, JsonResponse
-from django.utils import timezone
+import newrelic.agent
+import requests
 
 from mcp_app.nr_utils import add_attrs
 
@@ -34,9 +32,9 @@ def get_session_credentials(session) -> Optional[dict]:
         return raw
     if isinstance(raw, str):
         try:
-            from .crypto import decrypt_json
+            from .crypto import InvalidToken, decrypt_json
             return decrypt_json(raw)
-        except Exception:
+        except (InvalidToken, json.JSONDecodeError):
             logger.warning("get_session_credentials: failed to decrypt session credentials — treating as expired")
             return None
     return None
