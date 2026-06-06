@@ -10,8 +10,15 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.DeleteModel(
-            name='AIClient',
+        # The ai_client table was already dropped from the database in 0007
+        # (DROP TABLE IF EXISTS, with state_operations=[]), which left AIClient
+        # in the migration STATE only. A plain DeleteModel here would emit a
+        # second DROP TABLE and fail with "no such table: ai_client" on any
+        # database that already ran 0007 (e.g. Railway). Make this a state-only
+        # delete so the model leaves the migration graph without a second DROP.
+        migrations.SeparateDatabaseAndState(
+            state_operations=[migrations.DeleteModel(name='AIClient')],
+            database_operations=[],
         ),
         migrations.AlterModelOptions(
             name='oauthtoken',

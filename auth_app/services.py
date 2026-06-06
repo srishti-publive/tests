@@ -177,4 +177,7 @@ def validate_cds_credentials(
         "CDS validation: publisher=%s status=%d latency_ms=%.2f",
         publisher_id, resp.status_code, latency_ms,
     )
-    return resp.status_code not in (401, 403), resp.status_code
+    # Only a 2xx means the credentials are genuinely valid. The previous check
+    # (status_code not in (401, 403)) wrongly treated 400 and 5xx as success,
+    # letting bad credentials through to authorization-code issuance.
+    return 200 <= resp.status_code < 300, resp.status_code
