@@ -167,8 +167,10 @@ def validate_cds_credentials(
     # is the smallest authenticated GET that exists for every publisher. The old
     # `/publisher-data/` path is not a real route (the API answers it with
     # 400 "Unknown Endpoint Path"), so it could never return a 2xx.
+    # Use the same env-configurable base URL as the CDS client (CDS_BASE_URL).
+    base = settings.CDS_BASE_URL.format(publisher_id=publisher_id)
     resp = requests.get(
-        f"https://cds.thepublive.com/publisher/{publisher_id}/posts/",
+        f"{base}/posts/",
         params={"limit": 1},
         headers={"Authorization": f"Basic {token}"},
         timeout=10,

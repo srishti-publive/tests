@@ -6,6 +6,7 @@ import json
 import logging
 import time
 
+from django.conf import settings
 import newrelic.agent
 import requests
 
@@ -15,7 +16,8 @@ from .shared import build_base_url, build_basic_auth_headers, slugify_url_path
 
 logger = logging.getLogger(__name__)
 
-_CDS_BASE = "https://cds.thepublive.com/publisher/{publisher_id}"
+# Env-configurable (CDS_BASE_URL); defaults to the beta host in settings.
+_CDS_BASE = settings.CDS_BASE_URL
 _REQUEST_TIMEOUT = 5   # seconds per attempt
 _RETRY_BACKOFF   = 1   # seconds between attempts
 

@@ -8,6 +8,7 @@ import json
 import logging
 import time
 
+from django.conf import settings
 import newrelic.agent
 import requests
 
@@ -17,7 +18,8 @@ from .shared import build_base_url, build_basic_auth_headers
 
 logger = logging.getLogger(__name__)
 
-_CMS_BASE        = "https://cms.thepublive.com/publisher/{publisher_id}"
+# Env-configurable (CMS_BASE_URL); defaults to the beta host in settings.
+_CMS_BASE        = settings.CMS_BASE_URL
 _REQUEST_TIMEOUT = 10  # seconds
 
 

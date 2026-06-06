@@ -16,6 +16,20 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 ALLOWED_HOSTS = ["*"]
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 
+# ── Publive API hosts ─────────────────────────────────────────────────────────
+# Base URL templates for the Publive CDS (read) and CMS (write) APIs. Override per
+# environment via env vars, e.g. to target production:
+#   CDS_BASE_URL=https://cds.thepublive.com/publisher/{publisher_id}
+#   CMS_BASE_URL=https://cms.thepublive.com/publisher/{publisher_id}
+# The "{publisher_id}" placeholder is filled per request. Do NOT add a trailing
+# slash — handler paths are appended with a leading "/" (e.g. "/posts/").
+CDS_BASE_URL = os.environ.get(
+    "CDS_BASE_URL", "https://cds-beta.thepublive.com/publisher/{publisher_id}"
+)
+CMS_BASE_URL = os.environ.get(
+    "CMS_BASE_URL", "https://cms-beta.thepublive.com/publisher/{publisher_id}"
+)
+
 # ── Apps & Middleware ─────────────────────────────────────────────────────────
 
 INSTALLED_APPS = [
