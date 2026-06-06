@@ -2,7 +2,8 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:$PORT --timeout 60"
+releaseCommand = "python manage.py migrate"
+startCommand = "gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:$PORT --timeout 60"
 healthcheckPath = "/auth/status"
-healthcheckTimeout = 300
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"

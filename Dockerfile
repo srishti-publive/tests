@@ -27,5 +27,5 @@ RUN python manage.py collectstatic --noinput
 EXPOSE 8000
 
 # Gunicorn: single worker + 50 threads — required for SSE session affinity.
-# Use shell form so $PORT is expanded at runtime (Railway injects PORT env var).
-CMD python manage.py migrate && gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:${PORT:-8000} --timeout 60 --access-logfile -
+# Shell form so ${PORT} is expanded at runtime; Railway sets PORT, local falls back to 8000.
+CMD gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:${PORT:-8000} --timeout 60 --access-logfile -
