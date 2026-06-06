@@ -17,7 +17,7 @@ from .shared import build_base_url, build_basic_auth_headers
 
 logger = logging.getLogger(__name__)
 
-_CMS_BASE        = "https://cms-beta.thepublive.com/publisher/{publisher_id}"
+_CMS_BASE        = "https://cms.thepublive.com/publisher/{publisher_id}"
 _REQUEST_TIMEOUT = 10  # seconds
 
 

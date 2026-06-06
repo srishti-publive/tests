@@ -163,8 +163,13 @@ def validate_cds_credentials(
     """
     token: str = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     t0: float = time.perf_counter()
+    # Validate against a documented, always-present CDS endpoint. `/posts/?limit=1`
+    # is the smallest authenticated GET that exists for every publisher. The old
+    # `/publisher-data/` path is not a real route (the API answers it with
+    # 400 "Unknown Endpoint Path"), so it could never return a 2xx.
     resp = requests.get(
-        f"https://cds-beta.thepublive.com/publisher/{publisher_id}/publisher-data/",
+        f"https://cds.thepublive.com/publisher/{publisher_id}/posts/",
+        params={"limit": 1},
         headers={"Authorization": f"Basic {token}"},
         timeout=10,
     )

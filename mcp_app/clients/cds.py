@@ -15,7 +15,7 @@ from .shared import build_base_url, build_basic_auth_headers, slugify_url_path
 
 logger = logging.getLogger(__name__)
 
-_CDS_BASE = "https://cds-beta.thepublive.com/publisher/{publisher_id}"
+_CDS_BASE = "https://cds.thepublive.com/publisher/{publisher_id}"
 _REQUEST_TIMEOUT = 5   # seconds per attempt
 _RETRY_BACKOFF   = 1   # seconds between attempts
 
