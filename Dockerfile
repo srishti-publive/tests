@@ -26,6 +26,8 @@ RUN python manage.py collectstatic --noinput
 
 EXPOSE 8000
 
-# Gunicorn: single worker + 50 threads — required for SSE session affinity.
-# Shell form so ${PORT} is expanded at runtime; Railway sets PORT, local falls back to 8000.
-CMD gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:${PORT:-8000} --timeout 60 --access-logfile -
+# Apply migrations then start gunicorn (single worker + 50 threads — required for
+# SSE session affinity). Migrations run in the entrypoint so they reliably apply
+# on every deploy with visible logs; ${PORT} is expanded at runtime by the shell.
+RUN chmod +x /app/entrypoint.sh
+CMD ["/app/entrypoint.sh"]

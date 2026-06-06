@@ -2,11 +2,10 @@
 builder = "dockerfile"
 
 [deploy]
-# Migrations run once per deploy in the release phase, before the new version
-# starts taking traffic. The container itself is started by the Dockerfile CMD
-# (shell form, so ${PORT} is expanded reliably) — we intentionally do NOT set a
-# startCommand here, to avoid a second start path whose $PORT may not expand.
-releaseCommand = "python manage.py migrate --noinput"
+# Migrations run in the container entrypoint (see entrypoint.sh / Dockerfile CMD),
+# not in a release phase — so they apply reliably with visible logs and a failing
+# release phase can't silently block the deploy. No startCommand override here, so
+# the Dockerfile CMD is the single start path.
 # Root endpoint is dependency-free (no DB, no session) so the healthcheck reflects
 # pure process liveness rather than the auth/session layer.
 healthcheckPath = "/"
