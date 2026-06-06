@@ -2,8 +2,13 @@
 builder = "dockerfile"
 
 [deploy]
-releaseCommand = "python manage.py migrate"
-startCommand = "gunicorn publive_mcp.wsgi -w 1 --threads 50 -b 0.0.0.0:$PORT --timeout 60"
-healthcheckPath = "/auth/status"
-healthcheckTimeout = 120
+# Migrations run once per deploy in the release phase, before the new version
+# starts taking traffic. The container itself is started by the Dockerfile CMD
+# (shell form, so ${PORT} is expanded reliably) — we intentionally do NOT set a
+# startCommand here, to avoid a second start path whose $PORT may not expand.
+releaseCommand = "python manage.py migrate --noinput"
+# Root endpoint is dependency-free (no DB, no session) so the healthcheck reflects
+# pure process liveness rather than the auth/session layer.
+healthcheckPath = "/"
+healthcheckTimeout = 300
 restartPolicyType = "on_failure"
