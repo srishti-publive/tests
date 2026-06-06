@@ -294,7 +294,6 @@ class OAuthTokenRefreshTests(TestCase):
             client_id=self.oauth_client.client_id,
             refresh_token=secrets.token_urlsafe(32),
             credentials={"publisherId": "3567", "apiKey": "k", "apiSecret": "s"},
-            expires_at=timezone.now() + timedelta(days=30),
         )
 
     def _refresh(self, refresh_token=None):
@@ -316,9 +315,3 @@ class OAuthTokenRefreshTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "invalid_grant")
 
-    def test_expired_refresh_token_rejected(self):
-        self.token_obj.expires_at = timezone.now() - timedelta(days=1)
-        self.token_obj.save()
-        resp = self._refresh()
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "invalid_grant")

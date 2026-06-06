@@ -5,6 +5,8 @@ from unittest.mock import patch
 from django.test import TestCase, Client
 from django.utils import timezone
 
+from auth_app.services import get_session_credentials
+
 
 class SessionAuthTests(TestCase):
     def setUp(self):
@@ -23,7 +25,9 @@ class SessionAuthTests(TestCase):
         self.assertTrue(resp.json()["success"])
         session = self.c.session
         self.assertIn("credentials", session)
-        self.assertEqual(session["credentials"]["publisherId"], "3567")
+        creds = get_session_credentials(session)
+        self.assertIsNotNone(creds)
+        self.assertEqual(creds["publisherId"], "3567")
 
     @patch("auth_app.views.validate_cds_credentials", return_value=(False, 401))
     def test_login_invalid_credentials_returns_401(self, _mock):

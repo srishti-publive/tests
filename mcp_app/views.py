@@ -58,6 +58,20 @@ def mcp_endpoint(request):
         return open_sse_connection(request, credentials, token_expires_at)
 
     if request.method == "POST":
+        content_type = request.META.get("CONTENT_TYPE", "")
+        if "application/json" not in content_type:
+            logger.warning(
+                "MCP POST rejected: invalid Content-Type=%r ua=%s",
+                content_type,
+                request.META.get("HTTP_USER_AGENT", "unknown")[:80],
+            )
+            return JsonResponse(
+                {
+                    "error": "unsupported_media_type",
+                    "error_description": "Content-Type must be application/json",
+                },
+                status=415,
+            )
         return handle_http_request(request, credentials, token_expires_at)
 
     return HttpResponse(status=405)

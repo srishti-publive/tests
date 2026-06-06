@@ -1,6 +1,8 @@
 # Responsibility: Auth data models — OAuth 2.0 PKCE flow only.
 from django.db import models
 
+from .fields import EncryptedJSONField
+
 
 class OAuthClient(models.Model):
     """A dynamically-registered OAuth 2.0 client (one per AI client install).
@@ -28,7 +30,7 @@ class OAuthCode(models.Model):
     client_id      = models.CharField(max_length=64, db_index=True)
     redirect_uri   = models.TextField()
     code_challenge = models.CharField(max_length=256)
-    credentials    = models.JSONField()
+    credentials    = EncryptedJSONField()
     expires_at     = models.DateTimeField()
 
     class Meta:
@@ -51,13 +53,13 @@ class OAuthToken(models.Model):
 
     token         = models.CharField(max_length=128, unique=True)
     client_id     = models.CharField(max_length=64, db_index=True, blank=True, default="")
+    publisher_id  = models.CharField(max_length=64, db_index=True, blank=True, default="")
     refresh_token = models.CharField(max_length=128, unique=True, null=True, blank=True)
-    credentials   = models.JSONField()
+    credentials   = EncryptedJSONField()
     created_at    = models.DateTimeField(auto_now_add=True, null=True)
-    expires_at    = models.DateTimeField()
 
     class Meta:
         db_table = "oauth_token"
-        ordering = ["-expires_at"]
+        ordering = ["-created_at"]
         verbose_name = "OAuth Token"
         verbose_name_plural = "OAuth Tokens"

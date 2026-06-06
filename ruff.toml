@@ -1,0 +1,46 @@
+# Ruff configuration for the Publive MCP server.
+# Targets Python 3.9 (Railway runtime).
+
+target-version = "py39"
+line-length = 120
+
+exclude = [
+    ".git",
+    "__pycache__",
+    "venv",
+    "*/migrations/*.py",
+    "newrelic-*.tar.gz",
+]
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade — flags py3.9-incompatible patterns before they break
+    "BLE",  # blind exception catches (BLE001)
+    "B",    # bugbear — common correctness issues
+    "SIM",  # flake8-simplify
+    "TID",  # tidy imports
+]
+
+ignore = [
+    "E501",   # line too long — handled by formatter, not linter
+    "N806",   # variable in function should be lowercase (we use Title-case for models)
+    "B008",   # do not perform function calls in default argument (Django view pattern)
+    "SIM108", # ternary operator — reduces clarity in some cases
+    "UP007",  # use X | Y for union — not valid in Python 3.9 runtime annotations
+    "UP006",  # use `list` instead of `List` — not valid in Python 3.9 runtime annotations
+]
+
+[lint.per-file-ignores]
+# Test files can use broad asserts and direct attribute access.
+"*/tests/*.py" = ["BLE001", "N802"]
+# Settings files import * intentionally.
+"publive_mcp/settings/*.py" = ["F401", "F403", "F405"]
+
+[lint.isort]
+known-first-party = ["auth_app", "mcp_app", "publive_mcp"]
+force-sort-within-sections = true

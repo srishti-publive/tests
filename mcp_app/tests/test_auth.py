@@ -1,6 +1,5 @@
 import json
 import secrets
-from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase, Client, RequestFactory
@@ -13,14 +12,12 @@ from mcp_app.protocol.auth import (
 )
 
 
-def _make_oauth_token(expired=False):
+def _make_oauth_token():
     raw = secrets.token_urlsafe(32)
-    expires_at = timezone.now() + (timedelta(days=-1) if expired else timedelta(days=30))
     OAuthToken.objects.create(
         token=raw,
         client_id="test_client",
         credentials={"publisherId": "3567", "apiKey": "k", "apiSecret": "s"},
-        expires_at=expires_at,
     )
     return raw
 
@@ -47,13 +44,7 @@ class GetCredentialsTests(TestCase):
         creds, expires_at, err = resolve_credentials(self._req(token=raw))
         self.assertIsNotNone(creds)
         self.assertEqual(creds["publisherId"], "3567")
-        self.assertIsNotNone(expires_at)
-        self.assertIsNone(err)
-
-    def test_expired_bearer_token_returns_none(self):
-        raw = _make_oauth_token(expired=True)
-        creds, _, err = resolve_credentials(self._req(token=raw))
-        self.assertIsNone(creds)
+        self.assertIsNone(expires_at)
         self.assertIsNone(err)
 
     def test_unknown_bearer_token_returns_none(self):
@@ -169,11 +160,6 @@ class MCPEndpointAuthTests(TestCase):
         data = resp.json()
         self.assertEqual(data["result"]["protocolVersion"], "2024-11-05")
         self.assertIn("tools", data["result"]["capabilities"])
-
-    def test_expired_token_returns_401(self):
-        raw = _make_oauth_token(expired=True)
-        resp = self.c.get("/mcp", HTTP_AUTHORIZATION=f"Bearer {raw}")
-        self.assertEqual(resp.status_code, 401)
 
     def test_session_expired_returns_401_with_typed_code(self):
         import time as _time

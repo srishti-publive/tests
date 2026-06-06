@@ -29,8 +29,11 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
+    "mcp_app.middleware.RequestIDMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "mcp_app.middleware.SecurityHeadersMiddleware",
+    "mcp_app.middleware.RateLimitMiddleware",
 ]
 
 ROOT_URLCONF = "publive_mcp.urls"
@@ -60,8 +63,6 @@ DATABASES = {
 }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-
-REDIS_URL = os.environ.get("REDIS_URL", "")
 
 CACHES = {
     "default": {

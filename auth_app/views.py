@@ -25,6 +25,8 @@ from .services import (
     check_origin,
     check_session_ttl,
     get_allowed_redirect_uris,
+    get_session_credentials,
+    set_session_credentials,
     parse_oauth_token_body,
     validate_cds_credentials,
 )
@@ -50,11 +52,13 @@ def oauth_server_metadata(request: HttpRequest) -> JsonResponse:
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/token",
+        "revocation_endpoint": f"{base_url}/revoke",
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": ["read", "write"],
     })
 
@@ -322,7 +326,6 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         if grant_type == "refresh_token":
             refresh_val: str = data.get("refresh_token", "")
             new_refresh: str = secrets.token_urlsafe(32)
-            new_expires = timezone.now() + timedelta(days=30)
 
             with transaction.atomic():
                 try:
@@ -339,23 +342,12 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
                         status=400,
                     )
 
-                if existing.expires_at < timezone.now():
-                    existing.delete()
-                    add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-                    record_metric("Custom/Auth/auth_failure_count", 1)
-                    logger.warning("OAuth token: expired refresh_token client=%s", existing.client_id)
-                    return JsonResponse(
-                        {"error": "invalid_grant", "error_description": "Refresh token expired"},
-                        status=400,
-                    )
-
                 # Atomic rotation: old refresh token is replaced before the response is sent.
                 access_token = existing.token
                 client_id = existing.client_id
                 publisher_id = existing.credentials.get("publisherId", "")
                 existing.refresh_token = new_refresh
-                existing.expires_at = new_expires
-                existing.save(update_fields=["refresh_token", "expires_at"])
+                existing.save(update_fields=["refresh_token"])
 
             add_attrs([
                 ("auth.result", "success"),
@@ -368,7 +360,6 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
             return JsonResponse({
                 "access_token": access_token,
                 "token_type": "bearer",
-                "expires_in": 30 * 24 * 3600,
                 "refresh_token": new_refresh,
             })
 
@@ -425,11 +416,10 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         # the AI client keeps the same stable token identity across re-authorisations.
         existing = OAuthToken.objects.filter(
             client_id=oauth_client_id,
-            expires_at__gt=timezone.now(),
-        ).filter(credentials__publisherId=publisher_id).first()
+            publisher_id=publisher_id,
+        ).first()
 
         if existing:
-            remaining: int = int((existing.expires_at - timezone.now()).total_seconds())
             # Backfill refresh_token for tokens created before the refresh_token migration.
             if not existing.refresh_token:
                 existing.refresh_token = secrets.token_urlsafe(32)
@@ -441,13 +431,12 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
                 ("auth.client_id", oauth_client_id),
             ])
             logger.info(
-                "OAuth token reused (stable): publisher=%s client=%s expires_in=%ds",
-                publisher_id, oauth_client_id, remaining,
+                "OAuth token reused (stable): publisher=%s client=%s",
+                publisher_id, oauth_client_id,
             )
             return JsonResponse({
                 "access_token": existing.token,
                 "token_type": "bearer",
-                "expires_in": remaining,
                 "refresh_token": existing.refresh_token,
             })
 
@@ -456,9 +445,9 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         OAuthToken.objects.create(
             token=token,
             client_id=oauth_client_id,
+            publisher_id=publisher_id,
             refresh_token=new_refresh,
             credentials=credentials,
-            expires_at=timezone.now() + timedelta(days=30),
         )
 
         add_attrs([
@@ -472,7 +461,6 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         return JsonResponse({
             "access_token": token,
             "token_type": "bearer",
-            "expires_in": 30 * 24 * 3600,
             "refresh_token": new_refresh,
         })
     except Exception as exc:
@@ -490,7 +478,7 @@ def connect(request: HttpRequest) -> HttpResponse:
 
 def auth_success(request: HttpRequest) -> HttpResponse:
     """Render the post-login success page; redirect to /connect if session is missing."""
-    if not request.session.get("credentials"):
+    if not get_session_credentials(request.session):
         return redirect("/connect")
     return render(request, "success.html")
 
@@ -551,11 +539,11 @@ def auth_login(request: HttpRequest) -> JsonResponse:
 
             now_ts: int = int(timezone.now().timestamp())   # Unix epoch — avoids fromisoformat py39 bug
             now_iso: str = timezone.now().isoformat()
-            request.session["credentials"] = {
+            set_session_credentials(request.session, {
                 "publisherId": publisher_id,
                 "apiKey": api_key,
                 "apiSecret": api_secret,
-            }
+            })
             request.session["authenticatedAt"] = now_iso
             request.session["session_created_at"] = now_ts   # authoritative clock for TTL check (int epoch)
             request.session["session_ttl_seconds"] = ttl_seconds
@@ -602,7 +590,7 @@ def auth_status(request: HttpRequest) -> JsonResponse:
     add_attrs([("auth.flow", "session")])
 
     try:
-        credentials = request.session.get("credentials")
+        credentials = get_session_credentials(request.session)
         if credentials:
             # Enforce server-side absolute TTL — catches sessions that Django's
             # cookie TTL would miss (e.g. SESSION_SAVE_EVERY_REQUEST disabled).
@@ -651,7 +639,8 @@ def auth_status(request: HttpRequest) -> JsonResponse:
 def auth_logout(request: HttpRequest) -> JsonResponse:
     """Flush the current session and log the publisher out."""
     set_txn_name("Auth/session_logout", group="Auth")
-    publisher_id: str = (request.session.get("credentials") or {}).get("publisherId", "unknown")
+    creds = get_session_credentials(request.session)
+    publisher_id: str = (creds or {}).get("publisherId", "unknown")
     request.session.flush()
     add_attrs([
         ("auth.flow", "session"),
@@ -661,4 +650,59 @@ def auth_logout(request: HttpRequest) -> JsonResponse:
     record_metric("Custom/Auth/session_logout_count", 1)
     logger.info("auth_logout: publisher=%s", publisher_id)
     return JsonResponse({"success": True})
+
+
+# ── Token revocation (RFC 7009) ───────────────────────────────────────────────
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@newrelic.agent.function_trace(name="oauth_revoke", group="Auth")
+def oauth_revoke(request: HttpRequest) -> JsonResponse:
+    """Revoke a bearer access token or refresh token (RFC 7009).
+
+    Always returns HTTP 200 — per spec, the server must not reveal whether
+    the token existed. Both access tokens and refresh tokens are accepted.
+    """
+    set_txn_name("Auth/oauth_revoke", group="Auth")
+    add_attrs([("auth.flow", "oauth_revoke")])
+
+    data, parse_err = parse_oauth_token_body(request)
+    if parse_err:
+        # Still return 200 per RFC 7009 § 2.2 — invalid requests are silently ignored
+        return JsonResponse({})
+
+    token_value: str = data.get("token", "").strip()
+    hint: str = data.get("token_type_hint", "").strip()
+
+    if not token_value:
+        return JsonResponse({})
+
+    revoked = False
+    try:
+        if hint == "refresh_token":
+            # Try refresh token first when hint is given
+            deleted, _ = OAuthToken.objects.filter(refresh_token=token_value).delete()
+            if not deleted:
+                deleted, _ = OAuthToken.objects.filter(token=token_value).delete()
+            revoked = bool(deleted)
+        else:
+            # Default: treat as access token; fall back to refresh token
+            deleted, _ = OAuthToken.objects.filter(token=token_value).delete()
+            if not deleted:
+                deleted, _ = OAuthToken.objects.filter(refresh_token=token_value).delete()
+            revoked = bool(deleted)
+    except Exception as exc:
+        notice_err(exc, [("error.layer", "auth")])
+        logger.error("oauth_revoke: unexpected error", exc_info=True)
+        # Still return 200 per spec
+        return JsonResponse({})
+
+    add_attrs([("auth.result", "success"), ("auth.token_revoked", revoked)])
+    record_metric("Custom/Auth/token_revoked_count", 1 if revoked else 0)
+    if revoked:
+        logger.info("oauth_revoke: token revoked hint=%s", hint or "access_token")
+    else:
+        logger.info("oauth_revoke: token not found (already expired or invalid) hint=%s", hint or "access_token")
+
+    return JsonResponse({})
 

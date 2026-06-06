@@ -47,23 +47,9 @@ class CleanupExpiredTokensTests(TestCase):
         self._run()
         self.assertEqual(OAuthCode.objects.count(), 1)
 
-    def test_deletes_expired_tokens(self):
-        OAuthToken.objects.create(
-            token=secrets.token_urlsafe(32),
-            client_id="c1",
-            credentials={},
-            expires_at=_past(),
-        )
-        self._run()
-        self.assertEqual(OAuthToken.objects.count(), 0)
-
-    def test_keeps_unexpired_tokens(self):
-        OAuthToken.objects.create(
-            token=secrets.token_urlsafe(32),
-            client_id="c1",
-            credentials={},
-            expires_at=_future(),
-        )
+    def test_tokens_are_never_deleted(self):
+        """OAuthTokens are permanent — cleanup never touches them."""
+        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="c1", credentials={})
         self._run()
         self.assertEqual(OAuthToken.objects.count(), 1)
 
@@ -73,21 +59,18 @@ class CleanupExpiredTokensTests(TestCase):
         self._run()
         self.assertTrue(OAuthClient.objects.filter(client_id="permanent_client").exists())
 
-    def test_mixed_records_only_deletes_expired(self):
-        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="a", credentials={}, expires_at=_past())
-        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="b", credentials={}, expires_at=_future())
+    def test_mixed_records_only_deletes_expired_codes(self):
+        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="a", credentials={})
+        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="b", credentials={})
         OAuthCode.objects.create(code=secrets.token_urlsafe(32), client_id="a", redirect_uri="x", code_challenge="y", credentials={}, expires_at=_past())
         OAuthCode.objects.create(code=secrets.token_urlsafe(32), client_id="b", redirect_uri="x", code_challenge="y", credentials={}, expires_at=_future())
 
         self._run()
 
-        self.assertEqual(OAuthToken.objects.count(), 1)
+        self.assertEqual(OAuthToken.objects.count(), 2)
         self.assertEqual(OAuthCode.objects.count(), 1)
 
     def test_output_reports_counts(self):
-        OAuthToken.objects.create(token=secrets.token_urlsafe(32), client_id="a", credentials={}, expires_at=_past())
         OAuthCode.objects.create(code=secrets.token_urlsafe(32), client_id="a", redirect_uri="x", code_challenge="y", credentials={}, expires_at=_past())
         output = self._run()
         self.assertIn("1 expired code", output)
-        self.assertIn("1 expired token", output)
-        self.assertNotIn("client", output.lower().split("cleaned")[1] if "cleaned" in output.lower() else "")

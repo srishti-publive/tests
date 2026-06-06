@@ -20,6 +20,81 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
 
+# ── Input schema validation ───────────────────────────────────────────────────
+
+# Pre-built name → inputSchema lookup for all 71 tools
+_SCHEMA_REGISTRY: dict = {
+    tool["name"]: tool.get("inputSchema", {})
+    for tool in (TOOLS + CMS_TOOLS)
+}
+
+_JSON_TYPE_MAP: dict = {
+    "string":  str,
+    "integer": int,
+    "boolean": bool,
+    "object":  dict,
+    "array":   list,
+    "number":  (int, float),
+}
+
+
+def _validate_tool_args(name: str, args: dict) -> dict:
+    """Validate args against the tool's inputSchema. Returns an error dict or None."""
+    schema = _SCHEMA_REGISTRY.get(name)
+    if not schema:
+        return None
+
+    properties: dict = schema.get("properties", {})
+    required: list   = schema.get("required", [])
+
+    # Required field check
+    for field in required:
+        if field not in args or args[field] is None or args[field] == "":
+            return {
+                "error_type": "invalid_params",
+                "message": f"Required field '{field}' is missing.",
+                "retryable": False,
+            }
+
+    # Type + constraint check for every provided field
+    for field, value in args.items():
+        if value is None:
+            continue
+        prop = properties.get(field)
+        if not prop:
+            continue  # extra fields are tolerated
+
+        expected_type = prop.get("type")
+        if expected_type and expected_type in _JSON_TYPE_MAP:
+            expected = _JSON_TYPE_MAP[expected_type]
+            # bool is a subclass of int in Python — reject bool for integer fields
+            if expected_type == "integer" and isinstance(value, bool):
+                return {
+                    "error_type": "invalid_params",
+                    "message": f"Field '{field}' must be an integer, got boolean.",
+                    "retryable": False,
+                }
+            if not isinstance(value, expected):
+                return {
+                    "error_type": "invalid_params",
+                    "message": (
+                        f"Field '{field}' must be of type {expected_type}, "
+                        f"got {type(value).__name__}."
+                    ),
+                    "retryable": False,
+                }
+
+        # minLength for string fields
+        min_length = prop.get("minLength")
+        if min_length is not None and isinstance(value, str) and len(value) < min_length:
+            return {
+                "error_type": "invalid_params",
+                "message": f"Field '{field}' must be at least {min_length} character(s) long.",
+                "retryable": False,
+            }
+
+    return None
+
 _UNIMPLEMENTED_METHODS: frozenset[str] = frozenset({
     "sampling/createMessage",
     "roots/list",
@@ -177,6 +252,20 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
     add_attrs([("mcp.tool_name", name), ("mcp.tool_input", tool_input)])
     record_metric(f"Custom/Tool/{name}/call_count", 1)
     record_metric("Custom/MCP/tool_call_count",    1)
+
+    # Validate arguments against the tool's inputSchema before dispatching
+    validation_error = _validate_tool_args(name, args or {})
+    if validation_error:
+        add_attrs([("mcp.tool_result_status", "invalid_params"), ("mcp.tool_is_error", True)])
+        record_metric("Custom/MCP/tool_validation_error_count", 1)
+        logger.warning(
+            "MCP tools/call validation error: tool=%s session=%s message=%s",
+            name, session_id, validation_error.get("message"),
+        )
+        return jsonrpc_ok(id_, {
+            "content": [{"type": "text", "text": json.dumps(validation_error)}],
+            "isError": True,
+        })
 
     # Session timeline (SSE sessions only — HTTP sessions have no entry)
     start_offset_ms = ai_think_ms = None

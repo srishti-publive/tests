@@ -1,5 +1,6 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
-# redirect-URI allowlisting, CDS credential verification, and session TTL checks.
+# redirect-URI allowlisting, CDS credential verification, session TTL checks,
+# and session credential encryption/decryption.
 import base64
 import json
 import logging
@@ -17,6 +18,34 @@ from django.utils import timezone
 from mcp_app.nr_utils import add_attrs
 
 logger = logging.getLogger(__name__)
+
+
+def get_session_credentials(session) -> Optional[dict]:
+    """Decrypt and return the credentials dict stored in the session.
+
+    Handles both the legacy format (plain dict, stored before Fix D was deployed)
+    and the new format (Fernet-encrypted string). Returns None if absent or corrupted.
+    """
+    raw = session.get("credentials")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        # Legacy session — plaintext dict written before encryption was enabled
+        return raw
+    if isinstance(raw, str):
+        try:
+            from .crypto import decrypt_json
+            return decrypt_json(raw)
+        except Exception:
+            logger.warning("get_session_credentials: failed to decrypt session credentials — treating as expired")
+            return None
+    return None
+
+
+def set_session_credentials(session, credentials: dict) -> None:
+    """Encrypt and store credentials in the session."""
+    from .crypto import encrypt_json
+    session["credentials"] = encrypt_json(credentials)
 
 
 def check_session_ttl(session) -> bool:

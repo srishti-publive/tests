@@ -1,8 +1,9 @@
 """Credential resolution and unauthorized-response helpers for MCP requests.
 
 resolve_credentials() returns a 3-tuple:
-    (credentials_dict | None, token_expires_at | None, error_code | None)
+    (credentials_dict | None, None, error_code | None)
 
+The second element is always None (tokens do not expire).
 error_code is one of the typed reason codes below — never a generic string.
 """
 import logging
@@ -11,7 +12,6 @@ from typing import Optional
 
 from django.conf import settings
 from django.http import JsonResponse
-from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +51,11 @@ def resolve_credentials(request):
 
 
 def _resolve_oauth_token(token_value: str):
-    """Resolve an OAuthToken bearer (PKCE flow).
-
-    Expired or unknown tokens return (None, None, None) — no session fallback.
-    """
+    """Resolve an OAuthToken bearer (PKCE flow). Unknown tokens return (None, None, None)."""
     try:
         from auth_app.models import OAuthToken
         oauth_token = OAuthToken.objects.get(token=token_value)
-        if oauth_token.expires_at >= timezone.now():
-            return oauth_token.credentials, oauth_token.expires_at, None
+        return oauth_token.credentials, None, None
     except Exception as exc:  # noqa: BLE001
         from auth_app.models import OAuthToken as _OT
         if not isinstance(exc, _OT.DoesNotExist):
@@ -70,11 +66,11 @@ def _resolve_oauth_token(token_value: str):
 
 def _resolve_session(request):
     """Resolve session credentials with server-side absolute TTL enforcement."""
-    credentials = request.session.get("credentials")
+    from auth_app.services import check_session_ttl, get_session_credentials
+    credentials = get_session_credentials(request.session)
     if not credentials:
         return None, None, None
 
-    from auth_app.services import check_session_ttl
     if check_session_ttl(request.session):
         if hasattr(request.session, "flush"):
             request.session.flush()
