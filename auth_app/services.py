@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from typing import Any, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from django.conf import settings
 from django.http import HttpRequest, JsonResponse
@@ -117,6 +117,39 @@ def validate_redirect_uris(uris: list[str]) -> bool:
 def redirect_uri_is_registered(redirect_uri: str, registered_uris: list[str]) -> bool:
     """Return True when redirect_uri exactly matches a client-registered URI."""
     return redirect_uri in registered_uris
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def is_loopback_redirect_uri(uri: str) -> bool:
+    """Return True for http://localhost:<port>/... or http://127.0.0.1:<port>/... URIs.
+
+    Native/desktop OAuth clients (RFC 8252 §7.3) bind an ephemeral local port at
+    launch and can't be allowlisted by exact string match — the authorization
+    server must accept any port for these.
+    """
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    return parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+
+
+def redirect_uris_match(requested: str, registered: str) -> bool:
+    """Return True when redirect URIs match exactly, or both are loopback URIs
+    that differ only by port.
+
+    RFC 8252 §7.3: the authorization server MUST allow any port to be specified
+    at request time for loopback redirect URIs, since native apps obtain an
+    ephemeral port from the OS when they start listening.
+    """
+    if requested == registered:
+        return True
+    if not (is_loopback_redirect_uri(requested) and is_loopback_redirect_uri(registered)):
+        return False
+    req, reg = urlsplit(requested), urlsplit(registered)
+    return (req.scheme, req.hostname, req.path) == (reg.scheme, reg.hostname, reg.path)
 
 
 def parse_oauth_token_body(request: HttpRequest) -> tuple[Optional[dict[str, Any]], Optional[JsonResponse]]:

@@ -68,6 +68,27 @@ class OAuthRegisterTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "invalid_redirect_uri")
 
+    def test_register_loopback_localhost_uri_accepted(self):
+        """Native clients (Claude Desktop, Cursor) bind an ephemeral local port,
+        so a loopback redirect_uri must be accepted even though it's not on the
+        static allowlist."""
+        resp = self.c.post(
+            "/register",
+            json.dumps({"redirect_uris": ["http://localhost:38967/oauth/callback"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["redirect_uris"], ["http://localhost:38967/oauth/callback"])
+
+    def test_register_loopback_127_0_0_1_uri_accepted(self):
+        resp = self.c.post(
+            "/register",
+            json.dumps({"redirect_uris": ["http://127.0.0.1:5173/callback"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 201)
+
     def test_register_permanent_no_expiry(self):
         """Client registrations are now permanent — no expires_at field."""
         resp = self.c.post(
@@ -130,6 +151,34 @@ class OAuthAuthorizeGetTests(TestCase):
         resp = self.c.get("/authorize", {
             "response_type": "code",
             "client_id": self.oauth_client.client_id,
+        })
+        self.assertEqual(resp.status_code, 400)
+
+
+@override_settings(OAUTH_ALLOWED_REDIRECT_URIS=[ALLOWED_REDIRECT], OAUTH_ALLOWED_ORIGINS=[])
+class OAuthAuthorizeLoopbackRedirectTests(TestCase):
+    """A native client registers with one ephemeral port and reconnects with another —
+    the authorization server must still recognize its redirect_uri (RFC 8252 §7.3)."""
+
+    def setUp(self):
+        self.c = Client()
+        self.oauth_client = _make_client(redirect_uri="http://localhost:38967/oauth/callback")
+
+    def test_get_with_different_port_accepted(self):
+        resp = self.c.get("/authorize", {
+            "response_type": "code",
+            "client_id": self.oauth_client.client_id,
+            "redirect_uri": "http://localhost:9999/oauth/callback",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "authorize.html")
+        self.assertNotIn("error", resp.context or {})
+
+    def test_get_with_different_path_rejected(self):
+        resp = self.c.get("/authorize", {
+            "response_type": "code",
+            "client_id": self.oauth_client.client_id,
+            "redirect_uri": "http://localhost:38967/different/path",
         })
         self.assertEqual(resp.status_code, 400)
 

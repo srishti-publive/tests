@@ -4,8 +4,10 @@ from django.test import RequestFactory, TestCase, override_settings
 
 from auth_app.services import (
     check_origin,
+    is_loopback_redirect_uri,
     parse_oauth_token_body,
     redirect_uri_is_registered,
+    redirect_uris_match,
     validate_redirect_uris,
 )
 
@@ -88,6 +90,56 @@ class RedirectUriIsRegisteredTests(TestCase):
 
     def test_empty_registered_list_rejects_all(self):
         self.assertFalse(redirect_uri_is_registered("https://claude.ai/callback", []))
+
+
+class IsLoopbackRedirectUriTests(TestCase):
+    def test_localhost_accepted(self):
+        self.assertTrue(is_loopback_redirect_uri("http://localhost:38967/oauth/callback"))
+
+    def test_127_0_0_1_accepted(self):
+        self.assertTrue(is_loopback_redirect_uri("http://127.0.0.1:5173/callback"))
+
+    def test_ipv6_loopback_accepted(self):
+        self.assertTrue(is_loopback_redirect_uri("http://[::1]:5173/callback"))
+
+    def test_https_loopback_rejected(self):
+        # Native apps use plain http for their local callback listener.
+        self.assertFalse(is_loopback_redirect_uri("https://localhost:5173/callback"))
+
+    def test_remote_host_rejected(self):
+        self.assertFalse(is_loopback_redirect_uri("http://claude.ai/callback"))
+
+    def test_malformed_uri_rejected(self):
+        self.assertFalse(is_loopback_redirect_uri("not-a-uri"))
+
+
+class RedirectUrisMatchTests(TestCase):
+    def test_exact_match_accepted(self):
+        self.assertTrue(redirect_uris_match("https://claude.ai/api/mcp/auth_callback", "https://claude.ai/api/mcp/auth_callback"))
+
+    def test_loopback_uris_differing_only_by_port_match(self):
+        self.assertTrue(
+            redirect_uris_match(
+                "http://localhost:38967/oauth/callback",
+                "http://localhost:9999/oauth/callback",
+            )
+        )
+
+    def test_loopback_uris_differing_by_path_do_not_match(self):
+        self.assertFalse(
+            redirect_uris_match(
+                "http://localhost:38967/oauth/callback",
+                "http://localhost:38967/other/callback",
+            )
+        )
+
+    def test_loopback_vs_remote_does_not_match(self):
+        self.assertFalse(
+            redirect_uris_match("http://localhost:38967/callback", "https://claude.ai/api/mcp/auth_callback")
+        )
+
+    def test_non_loopback_mismatch_rejected(self):
+        self.assertFalse(redirect_uris_match("https://evil.com/callback", "https://claude.ai/api/mcp/auth_callback"))
 
 
 class ParseOAuthTokenBodyTests(TestCase):

@@ -26,7 +26,9 @@ from .services import (
     check_session_ttl,
     get_allowed_redirect_uris,
     get_session_credentials,
+    is_loopback_redirect_uri,
     parse_oauth_token_body,
+    redirect_uris_match,
     set_session_credentials,
     validate_cds_credentials,
 )
@@ -88,7 +90,7 @@ def oauth_register(request: HttpRequest) -> JsonResponse:
     else:
         redirect_uri = str(body.get("redirect_uri", "")).strip()
 
-    if redirect_uri and redirect_uri not in get_allowed_redirect_uris():
+    if redirect_uri and redirect_uri not in get_allowed_redirect_uris() and not is_loopback_redirect_uri(redirect_uri):
         add_attrs([("auth.flow", "oauth_register"), ("auth.result", "failure")])
         logger.warning("OAuth register: disallowed redirect_uri=%s", redirect_uri)
         return JsonResponse(
@@ -171,7 +173,7 @@ def _validate_authorize_request(
         return "invalid_request", "Client has no registered redirect URI"
     if not redirect_uri:
         return "invalid_request", "redirect_uri is required"
-    if redirect_uri != registered_uri:
+    if not redirect_uris_match(redirect_uri, registered_uri):
         return "invalid_request", "redirect_uri does not match the registered value"
 
     return None
