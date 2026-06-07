@@ -104,17 +104,9 @@ OAUTH_ALLOWED_ORIGINS = [
     "https://api.claude.ai",
 ]
 
-# Exact redirect URIs allowed during dynamic client registration (OAuth 2.1).
-# Extend at deploy time via OAUTH_ALLOWED_REDIRECT_URIS_EXTRA (comma-separated).
-OAUTH_ALLOWED_REDIRECT_URIS = [
-    "https://claude.ai/api/mcp/auth_callback",
-    "https://claude.com/api/mcp/auth_callback",
-]
-_extra_redirect_uris = os.environ.get("OAUTH_ALLOWED_REDIRECT_URIS_EXTRA", "")
-if _extra_redirect_uris:
-    OAUTH_ALLOWED_REDIRECT_URIS.extend(
-        uri.strip() for uri in _extra_redirect_uris.split(",") if uri.strip()
-    )
+# Dynamic client registration (RFC 7591 / OAuth 2.1) is open to any client —
+# redirect_uri just has to be https:// or a loopback address. See
+# auth_app.services.is_registrable_redirect_uri.
 
 # ── Static files ──────────────────────────────────────────────────────────────
 

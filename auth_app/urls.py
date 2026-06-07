@@ -17,6 +17,7 @@ urlpatterns = [
     path("oauth/token", views.oauth_token, name="oauth-token"),
     path("revoke", views.oauth_revoke, name="oauth-revoke"),
     path("oauth/revoke", views.oauth_revoke, name="oauth-revoke-prefixed"),
+    path("userinfo", views.oauth_userinfo, name="oauth-userinfo"),
     # Session-based auth (human browser users)
     path("connect", views.connect, name="connect"),
     path("auth/login", views.auth_login, name="auth_login"),

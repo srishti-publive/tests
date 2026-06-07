@@ -19,14 +19,14 @@ import newrelic.agent
 import requests
 
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
+from mcp_app.protocol.auth import build_unauthorized_response, resolve_credentials
 
 from .models import OAuthClient, OAuthCode, OAuthToken
 from .services import (
     check_origin,
     check_session_ttl,
-    get_allowed_redirect_uris,
     get_session_credentials,
-    is_loopback_redirect_uri,
+    is_registrable_redirect_uri,
     parse_oauth_token_body,
     redirect_uris_match,
     set_session_credentials,
@@ -56,6 +56,7 @@ def oauth_server_metadata(request: HttpRequest) -> JsonResponse:
         "token_endpoint": f"{base_url}/token",
         "revocation_endpoint": f"{base_url}/revoke",
         "registration_endpoint": f"{base_url}/register",
+        "userinfo_endpoint": f"{base_url}/userinfo",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
@@ -90,11 +91,14 @@ def oauth_register(request: HttpRequest) -> JsonResponse:
     else:
         redirect_uri = str(body.get("redirect_uri", "")).strip()
 
-    if redirect_uri and redirect_uri not in get_allowed_redirect_uris() and not is_loopback_redirect_uri(redirect_uri):
+    if redirect_uri and not is_registrable_redirect_uri(redirect_uri):
         add_attrs([("auth.flow", "oauth_register"), ("auth.result", "failure")])
-        logger.warning("OAuth register: disallowed redirect_uri=%s", redirect_uri)
+        logger.warning("OAuth register: insecure redirect_uri=%s", redirect_uri)
         return JsonResponse(
-            {"error": "invalid_redirect_uri", "error_description": "redirect_uri is not on the allowlist"},
+            {
+                "error": "invalid_redirect_uri",
+                "error_description": "redirect_uri must use https:// or be a loopback address (http://localhost or http://127.0.0.1)",
+            },
             status=400,
         )
 
@@ -162,11 +166,8 @@ def _validate_authorize_request(
 
     if not client_id:
         return "invalid_request", "client_id is required"
+    oauth_client = OAuthClient.objects.get(client_id=client_id)
 
-    try:
-        oauth_client = OAuthClient.objects.get(client_id=client_id)
-    except OAuthClient.DoesNotExist:
-        return "invalid_client", "Unknown client"
 
     registered_uri: str = oauth_client.redirect_uri or ""
     if not registered_uri:
@@ -678,4 +679,32 @@ def oauth_revoke(request: HttpRequest) -> JsonResponse:
         logger.info("oauth_revoke: token not found (already expired or invalid) hint=%s", hint or "access_token")
 
     return JsonResponse({})
+
+
+# ── UserInfo (OIDC-style identity claims) ─────────────────────────────────────
+
+@newrelic.agent.function_trace(name="oauth_userinfo", group="Auth")
+def oauth_userinfo(request: HttpRequest) -> JsonResponse:
+    """Return identity claims for the caller resolved from their Bearer token or session.
+
+    Mirrors the OpenID Connect UserInfo endpoint so any OAuth-aware MCP client can
+    discover "who am I" via standard discovery (advertised as userinfo_endpoint in
+    oauth_server_metadata) instead of guessing from tool results. `sub` is the
+    stable subject identifier — here, the delegated Publive publisher ID, since
+    Publive credentials are issued per-publisher rather than per individual user.
+    """
+    set_txn_name("Auth/userinfo", group="Auth")
+    add_attrs([("auth.flow", "userinfo")])
+
+    credentials, _, error_code = resolve_credentials(request)
+    if not credentials:
+        add_attrs([("auth.result", "failure"), ("auth.failure_reason", error_code or "unauthenticated")])
+        return build_unauthorized_response(request, error_code)
+
+    publisher_id: str = credentials.get("publisherId", "")
+    add_attrs([("auth.result", "success"), ("auth.publisher_id", publisher_id)])
+    return JsonResponse({
+        "sub": publisher_id,
+        "publisher_id": publisher_id,
+    })
 

@@ -100,25 +100,6 @@ def check_origin(request: HttpRequest) -> Optional[JsonResponse]:
     )
 
 
-def get_allowed_redirect_uris() -> set[str]:
-    """Return the exact redirect URIs permitted at dynamic client registration."""
-    uris: list[str] = list(getattr(settings, "OAUTH_ALLOWED_REDIRECT_URIS", []))
-    return set(uris)
-
-
-def validate_redirect_uris(uris: list[str]) -> bool:
-    """Return True only when every redirect URI exactly matches an allowed URI."""
-    if not uris:
-        return True
-    allowed = get_allowed_redirect_uris()
-    return all(uri in allowed for uri in uris)
-
-
-def redirect_uri_is_registered(redirect_uri: str, registered_uris: list[str]) -> bool:
-    """Return True when redirect_uri exactly matches a client-registered URI."""
-    return redirect_uri in registered_uris
-
-
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
@@ -134,6 +115,25 @@ def is_loopback_redirect_uri(uri: str) -> bool:
     except ValueError:
         return False
     return parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+
+
+def is_registrable_redirect_uri(uri: str) -> bool:
+    """Return True for redirect URIs acceptable at dynamic client registration.
+
+    Per RFC 7591 / OAuth 2.1, registration is open to any client — the server
+    doesn't pre-approve specific apps by URL. The only requirement is transport
+    security: either HTTPS (web/mobile callbacks) or a loopback address (native
+    apps per RFC 8252 §7.3, which can't use HTTPS for an ephemeral local port).
+    Plain http:// to a non-loopback host is rejected as it would leak the
+    authorization code over an insecure channel.
+    """
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    if parts.scheme == "https" and parts.hostname:
+        return True
+    return is_loopback_redirect_uri(uri)
 
 
 def redirect_uris_match(requested: str, registered: str) -> bool:
