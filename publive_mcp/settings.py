@@ -8,14 +8,11 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ── Security ──────────────────────────────────────────────────────────────────
-
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 DEBUG = os.environ.get("DEBUG", "False") == "True"
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 
-# ── Apps & Middleware ─────────────────────────────────────────────────────────
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -48,8 +45,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "publive_mcp.wsgi.application"
-
-# ── Database ──────────────────────────────────────────────────────────────────
+\
 
 DATABASES = {
     "default": dj_database_url.config(
@@ -58,9 +54,7 @@ DATABASES = {
     )
 }
 
-# ── Redis & Cache ─────────────────────────────────────────────────────────────
-
-REDIS_URL = os.environ.get("REDIS_URL", "")
+# ── Cache ─────────────────────────────────────────────────────────────────────
 
 CACHES = {
     "default": {
@@ -76,15 +70,13 @@ SESSION_ENGINE = "django.contrib.sessions.backends.db"
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
-# SESSION_COOKIE_AGE is only the ceiling for "Always" sessions (remember_for_days=-1).
-# Individual sessions set their own absolute TTL via session.set_expiry() at login time.
-SESSION_COOKIE_AGE = 10 * 365 * 24 * 3600  # 10-year ceiling for "Always" sessions
+SESSION_COOKIE_AGE = 10 * 365 * 24 * 3600
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = "Lax"
 # Disabled so that Django does NOT roll the session expiry forward on each request.
-# Absolute TTL enforcement uses session_created_at + session_ttl_seconds stored at
-# login time and checked by check_session_ttl() / _resolve_session().
+# check_session_ttl() / _resolve_session() still enforce session_ttl_seconds for
+# any pre-existing sessions that were created with a finite TTL before this change.
 SESSION_SAVE_EVERY_REQUEST = False
 
 # ── HTTPS / TLS ───────────────────────────────────────────────────────────────
@@ -140,8 +132,6 @@ LOGGING = {
     "formatters": {
         "json": {
             "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
-            # Include timestamp, level, logger name, and message as top-level JSON keys.
-            # Extra fields passed via logger.info("...", extra={...}) also appear here.
             "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
         },
     },
@@ -162,7 +152,6 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
-        # Application code: DEBUG in dev, INFO in prod
         "mcp_app": {
             "handlers": ["console"],
             "level": "DEBUG" if DEBUG else "INFO",

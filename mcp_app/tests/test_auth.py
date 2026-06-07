@@ -161,15 +161,17 @@ class MCPEndpointAuthTests(TestCase):
         self.assertIn("tools", data["result"]["capabilities"])
 
     def test_session_expired_returns_401_with_typed_code(self):
+        """A legacy session with a stored finite TTL must still be rejected as expired."""
         import time as _time
         sc = Client()
         with patch("auth_app.views.validate_cds_credentials", return_value=(True, 200)):
             sc.post(
                 "/auth/login",
-                json.dumps({"publisherId": "3567", "apiKey": "k", "apiSecret": "s", "remember_for_days": 1}),
+                json.dumps({"publisherId": "3567", "apiKey": "k", "apiSecret": "s"}),
                 content_type="application/json",
             )
         session = sc.session
+        session["session_ttl_seconds"] = 1 * 24 * 3600   # simulate a legacy 1-day session
         session["session_created_at"] = int(_time.time()) - (2 * 24 * 3600)
         session.save()
 

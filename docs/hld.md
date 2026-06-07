@@ -175,7 +175,7 @@ Client → POST /mcp  (Authorization: Bearer <token>)
 ### CDS tools — read-only (22 tools)
 
 | Group | Tools |
-|---|---|
+|-------|---|
 | Posts | `fetch_published_posts`, `fetch_published_post`, `fetch_post_by_url`, `fetch_liveblog_with_updates`, `fetch_trending_posts` |
 | Categories | `fetch_published_categories`, `fetch_published_category` |
 | Tags | `fetch_published_tags`, `fetch_published_tag` |
@@ -241,7 +241,7 @@ Write tools follow a tiered safety model. See `docs/tools.md` for full detail.
 Executed in order on every request:
 
 | Middleware | Responsibility |
-|---|---|
+|------------|----------------|
 | `SecurityMiddleware` | HTTPS redirect, HSTS, `X-Content-Type-Options` |
 | `WhiteNoiseMiddleware` | Serve static files directly from the process (no nginx needed) |
 | `RequestIDMiddleware` | Attach `X-Request-ID` to every request/response for log correlation |
@@ -311,7 +311,7 @@ Running container
     · CREDENTIALS_ENCRYPTION_KEY → Fernet key (must be set manually)
 ```
 
-**Scaling constraint:** 1 worker is an architectural requirement for SSE session affinity, not a tuning parameter. Horizontal scaling requires externalising `_sse_sessions` to Redis. See `docs/deployment.md`.
+**Scaling constraint:** 1 worker is an architectural requirement for SSE session affinity, not a tuning parameter. Horizontal scaling requires externalising `_sse_sessions` to a shared store. See `docs/deployment.md`.
 
 ---
 
@@ -347,11 +347,7 @@ python-dotenv       — load .env in local dev
 requests            — outbound HTTP to CDS/CMS APIs
 newrelic 13         — APM, custom events, metrics
 python-json-logger  — structured JSON log output
-django-redis        — optional Redis cache backend (not yet wired; locmem used)
-redis               — Redis client (required by django-redis; installed but inactive)
 ```
-
-`django-redis` and `redis` are installed but the cache backend is currently `LocMemCache`. They are ready to be wired when SSE session state is externalised for multi-instance deployments.
 
 ---
 

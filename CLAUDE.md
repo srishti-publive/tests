@@ -24,7 +24,7 @@ python manage.py test
 python manage.py test mcp_app.tests.TestClassName.test_method_name
 ```
 
-**Environment:** Copy `.env.example` to `.env` and fill in values before running locally. Requires `DJANGO_SECRET_KEY` and optionally `DATABASE_URL` (defaults to SQLite), `REDIS_URL` (defaults to LocMemCache).
+**Environment:** Copy `.env.example` to `.env` and fill in values before running locally. Requires `DJANGO_SECRET_KEY` and optionally `DATABASE_URL` (defaults to SQLite).
 
 **Deployment:** Railway with gunicorn (`-w 1 --threads 50`). The `release` phase in `Procfile` runs migrations and `collectstatic` automatically.
 

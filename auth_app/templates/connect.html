@@ -429,19 +429,6 @@
         </div>
       </div>
 
-      <div class="field">
-        <label for="rememberFor">Stay logged in for</label>
-        <select id="rememberFor">
-          <option value="90" selected>90 days (recommended)</option>
-          <option value="-1">Always (never expires)</option>
-          <option value="custom">Custom…</option>
-          <option value="0">This session only</option>
-        </select>
-        <div id="customDaysWrap" style="display:none; margin-top:8px;">
-          <input type="number" id="customDays" min="1" max="3650" placeholder="Number of days" />
-        </div>
-      </div>
-
       <button class="btn" id="connectBtn" onclick="handleConnect()">
         <div class="btn-inner">
           <div class="spinner" id="spinner"></div>
@@ -452,7 +439,7 @@
       <hr class="divider" />
 
       <p class="footer-note">
-        <span id="sessionNote">Session lasts 90 days from login.</span><br />
+        <span id="sessionNote">You'll stay connected until you disconnect.</span><br />
         <a href="https://thepublive.com/contact-us" target="_blank">Need help? Contact Publive →</a>
       </p>
 
@@ -471,45 +458,10 @@
       });
     });
 
-    function updateFooterNote(val) {
-      const note = document.getElementById('sessionNote');
-      if (val === '0')       note.textContent = 'Session ends when you close the browser.';
-      else if (val === '-1') note.textContent = 'Session never expires.';
-      else if (val === 'custom') {
-        const days = parseInt(document.getElementById('customDays').value, 10) || 0;
-        note.textContent = days > 0
-          ? `Session lasts ${days} day${days === 1 ? '' : 's'} from login.`
-          : 'Enter a number of days above.';
-      } else {
-        const d = parseInt(val, 10);
-        note.textContent = `Session lasts ${d} day${d === 1 ? '' : 's'} from login.`;
-      }
-    }
-
-    document.getElementById('rememberFor').addEventListener('change', function () {
-      const wrap = document.getElementById('customDaysWrap');
-      wrap.style.display = this.value === 'custom' ? 'block' : 'none';
-      updateFooterNote(this.value);
-    });
-
-    document.getElementById('customDays').addEventListener('input', function () {
-      updateFooterNote('custom');
-    });
-
-    function getRememberForDays() {
-      const sel = document.getElementById('rememberFor').value;
-      if (sel === 'custom') {
-        const days = parseInt(document.getElementById('customDays').value, 10);
-        return (!days || days < 1) ? 90 : days;
-      }
-      return parseInt(sel, 10);
-    }
-
     async function handleConnect() {
       const publisherId      = document.getElementById('publisherId').value.trim();
       const apiKey           = document.getElementById('apiKey').value.trim();
       const apiSecret        = document.getElementById('apiSecret').value.trim();
-      const rememberForDays  = getRememberForDays();
       const errorBox         = document.getElementById('errorBox');
       const btn              = document.getElementById('connectBtn');
       const spinner          = document.getElementById('spinner');
@@ -522,14 +474,6 @@
         return;
       }
 
-      if (document.getElementById('rememberFor').value === 'custom') {
-        const days = parseInt(document.getElementById('customDays').value, 10);
-        if (!days || days < 1) {
-          showError('Please enter a valid number of days for the custom duration.');
-          return;
-        }
-      }
-
       btn.disabled = true;
       spinner.style.display = 'block';
       btnText.textContent = 'Verifying credentials…';
@@ -538,7 +482,7 @@
         const res  = await fetch('/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ publisherId, apiKey, apiSecret, remember_for_days: rememberForDays }),
+          body: JSON.stringify({ publisherId, apiKey, apiSecret }),
           credentials: 'include',
         });
         const data = await res.json();

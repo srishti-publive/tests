@@ -142,7 +142,7 @@ The single-worker gunicorn requirement exists because SSE sessions are pinned to
 **Solutions (in order of preference):**
 1. **Keep `desired count = 1`** — simplest; fine for a single-publisher deployment.
 2. **ALB sticky sessions** — enable session stickiness on the target group so the same client always routes to the same task. Works for SSE, but sticky sessions are best-effort.
-3. **Externalize session state** — replace the in-process `_sse_sessions` dict and `session_stats` in `mcp_app/transport/sse.py` with Redis (e.g. ElastiCache). Then any task can serve any request. This is the right approach for multi-task production deployments.
+3. **Externalize session state** — replace the in-process `_sse_sessions` dict and `session_stats` in `mcp_app/transport/sse.py` with a shared external store. Then any task can serve any request. This is the right approach for multi-task production deployments.
 
 ### Minimal task definition (key fields)
 

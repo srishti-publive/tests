@@ -66,7 +66,7 @@ Key fields: same as `MCPToolError` plus `degraded_reason`.
 ### SSE session lifecycle events
 
 | Event | When |
-|---|---|
+|-------|------|
 | `SSESessionOpen` | Client connects via `GET /mcp` (SSE transport) |
 | `SSESessionClose` | Client disconnects or server closes the stream |
 | `MCPSessionAbandoned` | Session closed with zero tool calls (client connected but never used) |
@@ -76,7 +76,7 @@ Key fields: same as `MCPToolError` plus `degraded_reason`.
 **`MCPSessionSummary` key fields:**
 
 | Field | Purpose |
-|---|---|
+|-------|---------|
 | `duration_ms` | Total session wall time |
 | `tool_call_count` | How many tools were called |
 | `tool_error_count` / `tool_degraded_count` | Quality signal per session |

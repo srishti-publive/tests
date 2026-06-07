@@ -8,7 +8,7 @@ The server supports two client types with fundamentally different lifecycles, so
 
 **Flow:**
 ```
-Client → POST /register          → issues client_id (no secret)
+Client → POST /register          → issues client_id 
 Client → GET  /authorize         → renders login form
 User   → POST /authorize         → validates CDS creds, issues auth code (10 min TTL)
 Client → POST /token             → PKCE verifier check, issues bearer token + refresh token
@@ -105,13 +105,13 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 **Rate limiting** (sliding window, in-process cache):
 
-| Endpoint | Limit | Window | Key |
-|---|---|---|---|
-| `POST /auth/login` | 10 req | 60s | IP |
-| `POST /register` | 20 req | 60s | IP |
-| `/authorize` | 20 req | 60s | IP |
-| `POST /token` | 20 req | 60s | IP |
-| `/mcp` | 300 req | 60s | Bearer token prefix |
+| Endpoint           | Limit | Window | Key |
+|--------------------|---------|-----|-----|
+| `POST /auth/login` | 10 req  | 60s | IP |
+| `POST /register`   | 20 req  | 60s | IP |
+| `/authorize`       | 20 req  | 60s | IP |
+| `POST /token`      | 20 req  | 60s | IP |
+| `/mcp`             | 300 req | 60s | Bearer token prefix |
 
 Fails open — a cache outage never blocks traffic.
 

@@ -518,25 +518,6 @@ def auth_login(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"error": f"Could not reach Publive API: {exc}"}, status=500)
 
         if ok:
-            # remember_for_days encoding:
-            #   -1 = Always (never expires — 10-year Django expiry)
-            #    0 = This session only (expires when browser closes)
-            #   >0 = N days absolute from login time
-            # Default is 90 days.  Any positive integer is valid (custom).
-            try:
-                remember_for_days: int = int(body.get("remember_for_days", 90))
-            except (TypeError, ValueError):
-                remember_for_days = 90
-            if remember_for_days < -1:
-                remember_for_days = 90
-
-            if remember_for_days == -1:
-                ttl_seconds: int = -1                            # always
-            elif remember_for_days == 0:
-                ttl_seconds = 0                                  # browser session
-            else:
-                ttl_seconds = remember_for_days * 24 * 3600     # absolute deadline
-
             now_ts: int = int(timezone.now().timestamp())   # Unix epoch — avoids fromisoformat py39 bug
             now_iso: str = timezone.now().isoformat()
             set_session_credentials(request.session, {
@@ -546,27 +527,18 @@ def auth_login(request: HttpRequest) -> JsonResponse:
             })
             request.session["authenticatedAt"] = now_iso
             request.session["session_created_at"] = now_ts   # authoritative clock for TTL check (int epoch)
-            request.session["session_ttl_seconds"] = ttl_seconds
-            request.session["remember_for_days"] = remember_for_days
+            request.session["session_ttl_seconds"] = -1      # never expires — only /auth/logout ends the session
 
-            if remember_for_days == -1:
-                # "Always" — set a far-future absolute expiry so Django keeps the session.
-                request.session.set_expiry(10 * 365 * 24 * 3600)
-            elif remember_for_days == 0:
-                request.session.set_expiry(0)                   # browser-session cookie
-            else:
-                request.session.set_expiry(ttl_seconds)         # absolute TTL
+            # Far-future absolute expiry so Django keeps the session alive until
+            # the user explicitly disconnects via /auth/logout.
+            request.session.set_expiry(10 * 365 * 24 * 3600)
 
             add_attrs([
                 ("auth.result", "success"),
                 ("auth.publisher_id", publisher_id),
-                ("auth.remember_for_days", remember_for_days),
             ])
             record_metric("Custom/Auth/session_login_count", 1)
-            logger.info(
-                "auth_login: success publisher=%s remember_for_days=%d ttl_seconds=%d",
-                publisher_id, remember_for_days, ttl_seconds,
-            )
+            logger.info("auth_login: success publisher=%s", publisher_id)
             return JsonResponse({"success": True, "redirectTo": "/auth/success"})
 
         add_attrs([("auth.result", "failure"), ("auth.failure_reason", "cds_auth_failed")])
@@ -621,7 +593,6 @@ def auth_status(request: HttpRequest) -> JsonResponse:
                 "authenticated": True,
                 "publisherId": credentials.get("publisherId"),
                 "authenticatedAt": request.session.get("authenticatedAt"),
-                "remember_for_days": request.session.get("remember_for_days", 90),
                 "session_expires_in_seconds": expires_in,
             })
 

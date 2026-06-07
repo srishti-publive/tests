@@ -460,7 +460,6 @@ SINCE 1 day ago FACET mcp.client_name
 | `BASE_URL` | Yes | Public URL of this server (used in OAuth redirect URIs) | `http://localhost:8000` |
 | `DATABASE_URL` | Yes (prod) | PostgreSQL connection string. Set automatically by Railway | SQLite (`db.sqlite3`) |
 | `DEBUG` | No | Enable Django debug mode | `False` |
-| `REDIS_URL` | No | Redis connection string for session caching. Without it, DB sessions are used | — |
 | `SESSION_COOKIE_AGE` | No | Session lifetime in seconds | `604800` (7 days) |
 | `NEW_RELIC_LICENSE_KEY` | No | New Relic ingest key | — |
 | `NEW_RELIC_APP_NAME` | No | App name shown in NR UI | `Publive MCP` |
