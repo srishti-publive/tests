@@ -8,3 +8,5 @@ python-dotenv==1.0.0
 newrelic==13.1.0
 python-json-logger>=2.0.7
 cryptography>=42.0.0
+redis>=5.0
+django-redis>=5.4

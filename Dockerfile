@@ -26,8 +26,11 @@ RUN python manage.py collectstatic --noinput
 
 EXPOSE 8000
 
-# Apply migrations then start gunicorn (single worker + 50 threads — required for
-# SSE session affinity). Migrations run in the entrypoint so they reliably apply
-# on every deploy with visible logs; ${PORT} is expanded at runtime by the shell.
+# Apply migrations then start gunicorn (single worker + 50 threads — staged at
+# this count while the now-Redis-backed SSE session/queue/stats routing
+# (mcp_app/transport/redis_session_store.py, redis_message_queue.py) is verified
+# in production; see docs/deployment.md for the worker-count rollout plan).
+# Migrations run in the entrypoint so they reliably apply on every deploy with
+# visible logs; ${PORT} is expanded at runtime by the shell.
 RUN chmod +x /app/entrypoint.sh
 CMD ["/app/entrypoint.sh"]

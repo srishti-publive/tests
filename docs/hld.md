@@ -72,14 +72,14 @@ Both paths validate credentials against `CDS /posts/?limit=1` before issuing a t
 The core of the server. Layered into four sub-concerns:
 
 **Transport layer** (`mcp_app/transport/`):
-- `sse.py` — Long-lived SSE sessions. One gunicorn thread per session. In-process message queue. Keepalive every 25s.
+- `sse.py` — Long-lived SSE sessions. One gunicorn thread per session, blocking on a Redis-backed message queue (`mcp_app/transport/redis_message_queue.py`) shared across processes/replicas. Keepalive every 25s.
 - `http.py` — Stateless POST. Supports single and batch JSON-RPC. Session ID derived from token hash (stable across requests).
 
 **Protocol layer** (`mcp_app/protocol/`):
 - `auth.py` — `resolve_credentials()`: Bearer token → DB lookup, or session cookie → session store.
 - `dispatch.py` — JSON-RPC router. Handles `initialize`, `tools/list`, `tools/call`, `ping`. Validates tool args against `inputSchema`. Enforces 50 CMS write-op limit per SSE session.
 - `session.py` — Session ID derivation, `MCPPrompt` rate limit (1000 events/min).
-- `session_store.py` — Shared in-process `session_stats` dict, updated by both transport and dispatch layers.
+- `session_store.py` — Compatibility shim re-exporting the Redis-backed stats API (`mcp_app/protocol/redis_session_stats.py`, a per-session Redis hash with atomic `HINCRBY`/`HINCRBYFLOAT`), shared cluster-wide and updated by both transport and dispatch layers.
 
 **Tool layer** (`mcp_app/cds/`, `mcp_app/cms/`):
 - Data-driven: each tool is a dict `{name, description, inputSchema, handler}` in `TOOLS` or `CMS_TOOLS`.
@@ -147,7 +147,7 @@ The core of the server. Layered into four sub-concerns:
      → dispatch_cds_tool()               → cds_get(credentials, "/posts/", params)
                                          → CDS API → JSON response
      → session_stats updated (timing, token estimate)
-   → response put on msg_queue
+   → response pushed onto session's Redis queue (push_message)
    ← HTTP 200 {"ok":true}
 
    ← (SSE stream) event: message  data: {"jsonrpc":"2.0","id":1,"result":{"content":[...]}}
@@ -311,7 +311,7 @@ Running container
     · CREDENTIALS_ENCRYPTION_KEY → Fernet key (must be set manually)
 ```
 
-**Scaling constraint:** 1 worker is an architectural requirement for SSE session affinity, not a tuning parameter. Horizontal scaling requires externalising `_sse_sessions` to a shared store. See `docs/deployment.md`.
+**Scaling constraint (historical):** 1 worker used to be an architectural requirement for SSE session affinity — `_sse_sessions`/`session_stats`/per-session queues lived in a worker's process memory, so `POST /mcp/message` had to land on the exact process holding `GET /mcp`'s state. That state is now externalised to Redis (`mcp_app/transport/redis_session_store.py`, `redis_message_queue.py`, `mcp_app/protocol/redis_session_stats.py` — see `docs/mcp-protocol.md` § "Cross-process routing"), so any worker/replica can serve any request for a session. `-w 1` remains for now as a staged rollout — verify the Redis-backed routing in production, then raise `-w`/`--threads`/replica count as a separate, revertible deploy. See `docs/deployment.md`.
 
 ---
 

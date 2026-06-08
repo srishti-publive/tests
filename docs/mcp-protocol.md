@@ -61,31 +61,47 @@ Client                          Server
 **Open (`GET /mcp`):**
 1. Auth resolved (Bearer or session cookie).
 2. UUID session ID generated.
-3. `queue.Queue(maxsize=100)` created and registered in `_sse_sessions[session_id]`.
-4. Session stats dict initialised in `session_stats[session_id]` (tool count, timings, token estimates).
+3. Session registered in Redis via `register_session()` (`mcp_app/transport/redis_session_store.py`) — encrypted credentials + a capped message queue (`mcp:session_queue:{id}`, see `redis_message_queue.py`), both keyed by session ID and shared across every worker/replica.
+4. Session stats hash initialised in Redis via `init_stats()` (`mcp_app/protocol/redis_session_stats.py`) — tool count, timings, token estimates.
 5. First SSE event sent: `event: endpoint` with the `POST /mcp/message` URL including the session ID. The client reads this URL and uses it for all subsequent messages.
-6. `StreamingHttpResponse` holds the connection open; a gunicorn thread is pinned for the session lifetime.
-7. Every 25 seconds of inactivity: `": keepalive\n\n"` is yielded to prevent proxy/load-balancer idle timeouts.
+6. `StreamingHttpResponse` holds the connection open; a gunicorn thread blocks on `pop_message()` (Redis `BLPOP`) for the session lifetime.
+7. Every 25 seconds without a message: `": keepalive\n\n"` is yielded to prevent proxy/load-balancer idle timeouts.
 
 **Message (`POST /mcp/message?sessionId=<id>`):**
-1. `sessionId` looked up in `_sse_sessions`. If missing → `MCPSessionMissing` event, HTTP 400.
+1. `sessionId` looked up via `get_session()` — a Redis read, reachable from any process. If missing → `MCPSessionMissing` event, HTTP 400.
 2. JSON-RPC body dispatched synchronously via `dispatch_jsonrpc()`.
-3. Response put onto `msg_queue` with a 30-second timeout. If the queue is full after 30s → response dropped, `Custom/MCP/queue_overflow_count` incremented.
-4. HTTP 200 `{"ok": true}` returned immediately (ACK). The response travels back on the SSE stream, not in this HTTP response.
+3. Response pushed onto the Redis-backed queue via `push_message()` with a 30-second timeout (polls `LLEN` with backoff — Redis has no blocking-push primitive). If still full after 30s → response dropped, `Custom/MCP/queue_overflow_count` incremented.
+4. HTTP 200 `{"ok": true}` returned immediately (ACK). The response travels back on the SSE stream — possibly served by a *different* process than the one that handled this POST — not in this HTTP response.
 
 **Close (client disconnect):**
 1. `event_stream()` generator's `finally` block fires.
-2. Session entry removed from `_sse_sessions` and `session_stats`.
+2. Session and queue entries removed from Redis (`close_session()`, `delete_queue()`); stats hash atomically snapshotted and removed (`pop_stats()`).
 3. `MCPSessionSummary` and `SSESessionClose` events emitted with full session roll-up.
 4. If `tool_count == 0`: `MCPSessionAbandoned` also emitted.
 
 ### Why the queue has a 100-message cap (`MCP_QUEUE_MAXSIZE`)
 
-The queue is bounded so a stalled or slow SSE consumer can't grow the server's memory unboundedly. 100 messages is far more than any single AI session would queue — a full queue means the client has stopped reading and the session is effectively dead. Override via `MCP_QUEUE_MAXSIZE` env var.
+The queue is bounded so a stalled or slow SSE consumer can't grow Redis memory unboundedly. 100 messages is far more than any single AI session would queue — a full queue means the client has stopped reading and the session is effectively dead. Override via `MCP_QUEUE_MAXSIZE` env var (passed through to `push_message()`'s `maxsize`).
 
-### Why SSE requires exactly 1 gunicorn worker
+### Cross-process routing (formerly: why SSE required exactly 1 gunicorn worker)
 
-SSE sessions live in `_sse_sessions` — an in-process dict in the worker's memory. `POST /mcp/message` must reach the **same process** that holds the queue for that `sessionId`. With multiple workers, the ALB/Railway router can send the POST to a different worker → `MCPSessionMissing`. Exactly 1 worker guarantees all traffic shares one dict. See `docs/deployment.md` for multi-instance options.
+SSE session state — the session registry, message queues, and stats — used to
+live in `_sse_sessions` / `session_stats`, in-process dicts in a single
+worker's memory. `POST /mcp/message` had to reach the **exact same process**
+that held the queue for that `sessionId`; with multiple workers the
+ALB/Railway router could send the POST to a different worker than the one
+serving the `GET /mcp` stream → `MCPSessionMissing`. Exactly 1 worker was the
+only way to guarantee both requests shared one dict.
+
+That state now lives in Redis (`mcp_app/transport/redis_session_store.py`,
+`redis_message_queue.py`, `mcp_app/protocol/redis_session_stats.py`) — a
+session opened on one process is fully visible to, and routable from, every
+other process or replica that shares the same `REDIS_URL`. `GET /mcp` and
+`POST /mcp/message` for the same session can now land on different
+workers/replicas without breaking. The codebase still runs `-w 1` for now (see
+`docs/deployment.md`) as a staged rollout — the worker count is a capacity knob
+to raise once the Redis-backed routing is verified in production, not an
+architectural pin anymore.
 
 ---
 
@@ -177,12 +193,12 @@ A validation failure returns `isError: true` to the client **without calling the
 ### Step 4: CMS write-op rate limit
 
 CMS write tools (anything that isn't `list_*`, `get_*`, `validate_*`) are split into two independent per-SSE-session buckets by `_cms_write_bucket()`:
-- **create** — `create_*`, `register_*`, `add_*`, `submit_*` → `session_stats[id]["create_op_count"]`
-- **update_delete** — `update_*`, `delete_*` → `session_stats[id]["update_delete_op_count"]`
+- **create** — `create_*`, `register_*`, `add_*`, `submit_*` → `create_op_count` field on the session's Redis stats hash
+- **update_delete** — `update_*`, `delete_*` → `update_delete_op_count` field on the same hash
 
-Each bucket is capped at 100; crossing either cap returns a rate-limit error for *that* bucket only — e.g. hitting 100 creates doesn't block updates/deletes, and vice versa. The limits are per-session, not per-publisher or per-minute, so a new session resets both counters.
+Each bucket is capped at 100; crossing either cap returns a rate-limit error for *that* bucket only — e.g. hitting 100 creates doesn't block updates/deletes, and vice versa. The limits are per-session, not per-publisher or per-minute, so a new session resets both counters. The counters are atomic Redis `HINCRBY`s (`increment()` in `mcp_app/protocol/redis_session_stats.py`) — correct under concurrent processes, not just concurrent threads.
 
-**Stateless HTTP transport is not covered by this check.** The counters live in `session_stats[session_id]`, which is only populated when an SSE session opens (`GET /mcp`). `POST /mcp` calls have no `session_stats` entry, so both counters read as `0` on every call and the limits never trigger for that transport.
+**Stateless HTTP transport is not covered by this check.** The counters live on the per-session Redis stats hash, which is only created when an SSE session opens (`GET /mcp`'s `init_stats()`). `POST /mcp` calls have no such hash, so `increment()` returns `None` (mirroring the old `if stats is not None` guard), both counters are treated as `0` on every call, and the limits never trigger for that transport.
 
 **Why split + 100:** Prevents runaway AI agents from bulk-modifying content in a single session, while keeping create flows (e.g. bulk-importing posts) from starving update/delete flows (e.g. bulk-editing existing ones) and vice versa. 100 per bucket is generous for normal editorial workflows; anything larger is likely an agent loop.
 

@@ -1,17 +1,20 @@
 """Session ID derivation and MCPPrompt event rate-limiting."""
 import hashlib
-import threading
 import time
 import uuid
+
+from mcp_app.redis_client import get_redis_client
 
 SESSION_PROTOCOL_KEY = "mcp_protocol_version"
 _SESSION_PROTOCOL_KEY = SESSION_PROTOCOL_KEY  # backward-compat alias
 
-# MCPPrompt event rate limit: at most this many per minute per process.
-_PROMPT_EVENT_MAX_PER_MIN  = 1000
-_prompt_event_count        = 0
-_prompt_event_window_start = time.monotonic()
-_prompt_event_lock         = threading.Lock()
+# MCPPrompt event rate limit: at most this many per minute, cluster-wide. Backed
+# by a Redis fixed-window counter (key = current minute bucket, INCR + EXPIRE) so
+# the budget is shared across every worker/replica — a per-process counter would
+# silently become `limit × process_count` once the app scales horizontally,
+# defeating its purpose as a New-Relic cost-control gate.
+_PROMPT_EVENT_MAX_PER_MIN = 1000
+_PROMPT_EVENT_KEY_TTL     = 120  # > window length, so a bucket always self-expires
 
 
 def derive_session_id(request) -> str:
@@ -35,14 +38,18 @@ def derive_session_id(request) -> str:
 
 
 def should_emit_prompt_event() -> bool:
-    """Return True when under the per-minute MCPPrompt event budget."""
-    global _prompt_event_count, _prompt_event_window_start
-    now = time.monotonic()
-    with _prompt_event_lock:
-        if now - _prompt_event_window_start >= 60.0:
-            _prompt_event_count        = 0
-            _prompt_event_window_start = now
-        if _prompt_event_count < _PROMPT_EVENT_MAX_PER_MIN:
-            _prompt_event_count += 1
-            return True
-    return False
+    """Return True when under the per-minute, cluster-wide MCPPrompt event budget.
+
+    Fixed window keyed by the current UTC minute: INCR is atomic on the Redis
+    side, so concurrent callers across every process/replica still get a single
+    consistent count with no lock. EXPIRE is set only by whichever caller first
+    creates the bucket (count == 1), and is generous (2x the window) so a
+    slow-to-arrive request near a window boundary can't race the key's deletion.
+    """
+    client = get_redis_client()
+    bucket = int(time.time() // 60)
+    key    = f"mcp:prompt_events:{bucket}"
+    count  = client.incr(key)
+    if count == 1:
+        client.expire(key, _PROMPT_EVENT_KEY_TTL)
+    return count <= _PROMPT_EVENT_MAX_PER_MIN

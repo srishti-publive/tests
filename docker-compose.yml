@@ -15,6 +15,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   web:
     build: .
     command: >
@@ -28,10 +38,13 @@ services:
       DJANGO_SETTINGS_MODULE: publive_mcp.settings.local
       DJANGO_SECRET_KEY: local-dev-secret-change-me
       DATABASE_URL: postgresql://postgres:postgres@db:5432/publive_mcp
+      REDIS_URL: redis://redis:6379/0
       BASE_URL: http://localhost:8000
       CREDENTIALS_ENCRYPTION_KEY: ""   # Set a real Fernet key for persistent local dev
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

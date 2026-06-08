@@ -54,7 +54,7 @@ Runs at every container start (the `CMD`):
 
 | Flag | Value | Why |
 |---|---|---|
-| `-w 1` | 1 worker process | SSE sessions are pinned to the process that opened them. Multiple workers would route `POST /mcp/message` to a different worker than the `GET /mcp` SSE stream, breaking the session. Railway runs one container — 1 worker is sufficient. |
+| `-w 1` | 1 worker process | Historically required because SSE session state (`_sse_sessions`, `session_stats`, per-session message queues) lived in a worker's process memory — a `POST /mcp/message` routed to a different worker than the `GET /mcp` stream couldn't find the session. That state now lives in Redis (`mcp_app/transport/redis_session_store.py`, `redis_message_queue.py`, `mcp_app/protocol/redis_session_stats.py` — shared across every worker/replica), so this is no longer an architectural constraint. The pin stays for now as a staged rollout: the Redis-backed routing ships first under the old constraint so it can be verified in production (watch `MCPSessionMissing` / `queue_overflow_count` / `session_abandon_count`) before `-w`/`--threads`/replica count is raised as a separate, trivially-revertible deploy. |
 | `--threads 50` | 50 threads | Each SSE session holds a thread open for its lifetime (blocking on a queue). 50 threads = 50 concurrent SSE sessions + capacity for regular HTTP requests. |
 | `--timeout 60` | 60s | SSE sessions run for minutes; the timeout applies to the initial request setup, not the streaming lifetime (gunicorn's gthread worker does not apply the timeout to streaming responses). |
 | `--access-logfile -` | stdout | Sends access logs to stdout so Railway captures them alongside application logs. |
@@ -116,8 +116,8 @@ Fargate is ECS (Elastic Container Service) with serverless compute — you give 
 ### What stays exactly the same
 - `Dockerfile` and `entrypoint.sh` — no changes needed.
 - Application code, settings, migrations.
-- Gunicorn config (`-w 1 --threads 50`) — SSE affinity constraint is the same.
-- All env vars — same names, set in ECS Task Definition environment or AWS Secrets Manager.
+- Gunicorn config (`-w 1 --threads 50`) — see "SSE constraint on Fargate" below; the Redis-backed session store means this is now a capacity tuning knob rather than an architectural pin, but it stays at `-w 1` until the new routing is verified in production.
+- All env vars — same names, set in ECS Task Definition environment or AWS Secrets Manager. Add `REDIS_URL` (see `.env.example`) — required once `mcp_app/transport/redis_session_store.py` is in the routing path; point it at a shared Redis (e.g. ElastiCache), not a per-task instance.
 
 ### What you replace (Railway → Fargate)
 
@@ -135,14 +135,25 @@ Fargate is ECS (Elastic Container Service) with serverless compute — you give 
 
 ### SSE constraint on Fargate
 
-The single-worker gunicorn requirement exists because SSE sessions are pinned to a process in memory. On Fargate with `desired count > 1`:
-- `GET /mcp` (SSE open) lands on Task A.
-- `POST /mcp/message` could be routed to Task B by the ALB → session not found → `MCPSessionMissing` event.
+SSE session state — `_sse_sessions`, `session_stats`, and per-session message
+queues — used to live in a worker's process memory, which meant `desired count
+> 1` was unsafe: `GET /mcp` (SSE open) could land on Task A while `POST
+/mcp/message` was routed to Task B by the ALB → session not found →
+`MCPSessionMissing` event.
 
-**Solutions (in order of preference):**
-1. **Keep `desired count = 1`** — simplest; fine for a single-publisher deployment.
-2. **ALB sticky sessions** — enable session stickiness on the target group so the same client always routes to the same task. Works for SSE, but sticky sessions are best-effort.
-3. **Externalize session state** — replace the in-process `_sse_sessions` dict and `session_stats` in `mcp_app/transport/sse.py` with a shared external store. Then any task can serve any request. This is the right approach for multi-task production deployments.
+That state has been externalized to Redis (`mcp_app/transport/redis_session_store.py`,
+`redis_message_queue.py`, `mcp_app/protocol/redis_session_stats.py`), so any
+task can now serve any request for a session — no ALB stickiness or
+single-task pinning required, **provided every task points at the same shared
+Redis** (e.g. ElastiCache — not a per-task sidecar instance, which would
+recreate the exact problem this solves). The remaining requirements:
+- `REDIS_URL` set to the shared Redis endpoint (TLS via `rediss://` where supported).
+- Size the Redis connection pool for `tasks × workers × threads` concurrent
+  `BLPOP`s — see the rollout/load-test notes referenced from the scaling plan.
+- `desired count` can be raised once the Redis-backed routing has been observed
+  in production (watch `MCPSessionMissing` / `queue_overflow_count` /
+  `session_abandon_count`) — treat the count bump as a separate, trivially
+  revertible deploy from the code change that enabled it.
 
 ### Minimal task definition (key fields)
 

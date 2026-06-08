@@ -1,5 +1,6 @@
-# Responsibility: Shared settings for all environments. Never import this directly —
-# use settings.local or settings.prod which extend this file.
+# Responsibility: Shared settings for all environments. 
+# Never import this directly use settings.local or settings.prod which extend this file.
+
 import os
 from pathlib import Path
 
@@ -16,13 +17,7 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 ALLOWED_HOSTS = ["*"]
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 
-# ── Publive API hosts ─────────────────────────────────────────────────────────
-# Base URL templates for the Publive CDS (read) and CMS (write) APIs. Override per
-# environment via env vars, e.g. to target production:
-#   CDS_BASE_URL=https://cds.thepublive.com/publisher/{publisher_id}
-#   CMS_BASE_URL=https://cms.thepublive.com/publisher/{publisher_id}
-# The "{publisher_id}" placeholder is filled per request. Do NOT add a trailing
-# slash — handler paths are appended with a leading "/" (e.g. "/posts/").
+
 CDS_BASE_URL = os.environ.get(
     "CDS_BASE_URL", "https://cds-beta.thepublive.com/publisher/{publisher_id}"
 )
@@ -30,7 +25,10 @@ CMS_BASE_URL = os.environ.get(
     "CMS_BASE_URL", "https://cms-beta.thepublive.com/publisher/{publisher_id}"
 )
 
-# ── Apps & Middleware ─────────────────────────────────────────────────────────
+# /*  
+#     Apps - self-contained module that implements a specific feature 
+#     Middleware - runs for every request and response, checkpoints before and after your views.
+# */
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -42,16 +40,18 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "whitenoise.middleware.WhiteNoiseMiddleware",
-    "mcp_app.middleware.RequestIDMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "mcp_app.middleware.RequestIDMiddleware",
     "mcp_app.middleware.SecurityHeadersMiddleware",
     "mcp_app.middleware.RateLimitMiddleware",
 ]
 
 ROOT_URLCONF = "publive_mcp.urls"
 
+
+# ### # 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -67,7 +67,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "publive_mcp.wsgi.application"
 
-# ── Database ──────────────────────────────────────────────────────────────────
+
 
 DATABASES = {
     "default": dj_database_url.config(
@@ -77,28 +77,33 @@ DATABASES = {
 }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
+# Redis-backed so the cache is shared across gunicorn workers/replicas
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        },
     }
 }
+
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 # Sessions stored in Postgres (via DATABASE_URL on Railway) so they survive redeploys.
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
-# 90-day ceiling; per-session TTL is set dynamically via session.set_expiry().
-SESSION_COOKIE_AGE = 90 * 24 * 3600
+SESSION_COOKIE_AGE = 10 * 356 * 24 * 3600
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
-# Refresh TTL on every request so active sessions never expire mid-use.
 SESSION_SAVE_EVERY_REQUEST = True
 
-# ── OAuth security ────────────────────────────────────────────────────────────
 
-# Origins allowed to call /oauth/token, /register, and /oauth/authorize (POST).
-# Desktop MCP clients do not send Origin — those are unconditionally allowed.
+
+# ── OAuth security ────────────────────────────────────────────────────────────
 OAUTH_ALLOWED_ORIGINS = [
     "https://claude.ai",
     "https://api.claude.ai",
@@ -107,8 +112,6 @@ OAUTH_ALLOWED_ORIGINS = [
 # Dynamic client registration (RFC 7591 / OAuth 2.1) is open to any client —
 # redirect_uri just has to be https:// or a loopback address. See
 # auth_app.services.is_registrable_redirect_uri.
-
-# ── Static files ──────────────────────────────────────────────────────────────
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
@@ -120,6 +123,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Emits each log line as JSON so New Relic Logs can index individual fields.
 # The NR agent injects trace.id and span.id automatically, enabling APM → Logs links.
 
+
+# ###### #
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

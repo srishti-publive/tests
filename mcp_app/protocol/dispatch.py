@@ -17,7 +17,12 @@ from mcp_app.nr_utils import (
 from mcp_app.prompt_capture import extract_prompt_for_tool_call, record_prompt_observability
 
 from .session import SESSION_PROTOCOL_KEY, should_emit_prompt_event
-from .session_store import session_stats, session_stats_lock
+from .session_store import (
+    append_tool_sequence,
+    get_timeline_and_set_client_name,
+    increment,
+    set_field,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -286,18 +291,15 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
     prompt_tokens   = max(1, len(prompt_text) // 4)
     session_trace_id = ""
 
-    with session_stats_lock:
-        stats = session_stats.get(session_id or "")
-        if stats is not None:
-            sess_start = stats.get("session_start_time")
-            last_end   = stats.get("last_tool_end_perf")
-            if sess_start is not None:
-                start_offset_ms = round((time.perf_counter() - sess_start) * 1000, 2)
-            if last_end is not None:
-                ai_think_ms = round((time.perf_counter() - last_end) * 1000, 2)
-            if stats.get("client_name") is None and request is not None:
-                stats["client_name"] = request.META.get("HTTP_USER_AGENT", "unknown")[:200]
-            session_trace_id = stats.get("session_trace_id", "")
+    user_agent = request.META.get("HTTP_USER_AGENT", "unknown")[:200] if request is not None else None
+    timeline   = get_timeline_and_set_client_name(session_id or "", user_agent)
+    sess_start = timeline.get("session_start_time")
+    last_end   = timeline.get("last_tool_end_perf")
+    if sess_start is not None:
+        start_offset_ms = round((time.perf_counter() - sess_start) * 1000, 2)
+    if last_end is not None:
+        ai_think_ms = round((time.perf_counter() - last_end) * 1000, 2)
+    session_trace_id = timeline.get("session_trace_id", "")
 
     if start_offset_ms is not None:
         add_attrs([("mcp.tool_start_offset_ms", start_offset_ms)])
@@ -310,13 +312,7 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
     if _is_cms_write(name):
         bucket      = _cms_write_bucket(name)
         counter_key = "create_op_count" if bucket == "create" else "update_delete_op_count"
-        with session_stats_lock:
-            write_stats = session_stats.get(session_id or "")
-            if write_stats is not None:
-                write_stats[counter_key] += 1
-                bucket_op_count = write_stats[counter_key]
-            else:
-                bucket_op_count = 0
+        bucket_op_count = increment(session_id or "", counter_key) or 0
         if bucket_op_count > 100:
             label = "Create" if bucket == "create" else "Update/delete"
             return jsonrpc_ok(id_, {"content": [{"type": "text", "text": json.dumps({
@@ -342,16 +338,14 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
         degraded_reason = (result.get("error") or result.get("error_type")) if isinstance(result, dict) else None
         is_degraded     = bool(degraded_reason)
 
-        with session_stats_lock:
-            upd = session_stats.get(session_id or "")
-            if upd is not None:
-                upd["total_tool_duration_ms"]         = upd.get("total_tool_duration_ms", 0.0) + duration_ms
-                upd["total_estimated_input_tokens"]   = upd.get("total_estimated_input_tokens", 0) + prompt_tokens
-                upd["total_estimated_output_tokens"]  = upd.get("total_estimated_output_tokens", 0) + output_tokens
-                upd["last_tool_end_perf"]             = time.perf_counter()
-                upd.setdefault("tool_sequence", []).append(name)
-                if is_degraded:
-                    upd["degraded_count"] = upd.get("degraded_count", 0) + 1
+        sid = session_id or ""
+        if increment(sid, "total_tool_duration_ms", duration_ms) is not None:
+            increment(sid, "total_estimated_input_tokens", prompt_tokens)
+            increment(sid, "total_estimated_output_tokens", output_tokens)
+            set_field(sid, "last_tool_end_perf", time.perf_counter())
+            append_tool_sequence(sid, name)
+            if is_degraded:
+                increment(sid, "degraded_count")
 
         if is_degraded:
             add_attrs([
@@ -419,13 +413,11 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
             ("mcp.error_category",      error_category),
         ])
 
-        with session_stats_lock:
-            upd = session_stats.get(session_id or "")
-            if upd is not None:
-                upd["total_tool_duration_ms"]        = upd.get("total_tool_duration_ms", 0.0) + duration_ms
-                upd["total_estimated_input_tokens"]  = upd.get("total_estimated_input_tokens", 0) + prompt_tokens
-                upd["last_tool_end_perf"]            = time.perf_counter()
-                upd.setdefault("tool_sequence", []).append(name)
+        sid = session_id or ""
+        if increment(sid, "total_tool_duration_ms", duration_ms) is not None:
+            increment(sid, "total_estimated_input_tokens", prompt_tokens)
+            set_field(sid, "last_tool_end_perf", time.perf_counter())
+            append_tool_sequence(sid, name)
 
         record_metric("Custom/MCP/tool_error_count",             1)
         record_metric(f"Custom/Tool/{name}/error_count",          1)

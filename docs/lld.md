@@ -369,48 +369,74 @@ Priority:
 
 ### `should_emit_prompt_event() → bool`
 
-Sliding-window rate limit for `MCPPrompt` NR events:
+Cluster-wide fixed-window rate limit for `MCPPrompt` NR events, backed by Redis
+`INCR`+`EXPIRE` (`mcp_app/redis_client.py`) — a per-process counter would
+silently become `limit × process_count` once the app scales horizontally,
+defeating its purpose as a NR-cost-control gate:
 
 ```python
-# module-level state
-_PROMPT_EVENT_MAX_PER_MIN  = 1000
-_prompt_event_count        = 0
-_prompt_event_window_start = time.monotonic()
+_PROMPT_EVENT_MAX_PER_MIN = 1000
+_PROMPT_EVENT_KEY_TTL     = 120   # > window length, so a bucket always self-expires
+
+bucket = int(time.time() // 60)              # current UTC-minute bucket
+key    = f"mcp:prompt_events:{bucket}"
+count  = client.incr(key)                    # atomic on the Redis side
+if count == 1:
+    client.expire(key, _PROMPT_EVENT_KEY_TTL)
+return count <= _PROMPT_EVENT_MAX_PER_MIN
 ```
 
-On each call (thread-safe via `_prompt_event_lock`):
-1. If `now - window_start >= 60.0`: reset count to 0, reset window_start.
-2. If `count < 1000`: increment count, return `True`.
-3. Else return `False`.
+Function name/signature unchanged from the old in-process sliding-window
+implementation, so `dispatch.py`'s call site needed no edit.
 
 ---
 
 ## `mcp_app/protocol/session_store.py`
 
-Exists solely to break a circular import between `transport/sse.py` and `protocol/dispatch.py` — both need `session_stats`.
+Thin compatibility shim re-exporting the Redis-backed stats API from
+`mcp_app/protocol/redis_session_stats.py` under the original names
+(`init_stats`, `increment`, `set_field`, `get_field`,
+`get_timeline_and_set_client_name`, `append_tool_sequence`, `pop_stats`) —
+`dispatch.py` and `transport/sse.py` needed only import-line changes, not
+call-site rewrites. Originally existed solely to break a circular import
+between `transport/sse.py` and `protocol/dispatch.py` (both need session
+stats); now also the seam that lets every worker/replica share one
+`session_stats` view via a Redis hash (`mcp:session_stats:{id}`, TTL 24h)
+instead of a single process's in-memory dict.
 
-```python
-session_stats: dict = {}                   # session_id → stats dict (schema below)
-session_stats_lock: threading.Lock = ...
-```
+Per-session counters use atomic `HINCRBY`/`HINCRBYFLOAT` (the latter for
+`session_start_time`, `total_tool_duration_ms`, `last_tool_end_perf` — see
+`_FLOAT_FIELDS` in `redis_session_stats.py`) in place of the old
+`with session_stats_lock: stats[field] += by`. `tool_sequence` is stored as a
+separate Redis list (`mcp:session_stats:{id}:tool_sequence`) rather than a
+field inside the hash. `pop_stats()` atomically snapshots and deletes both via
+a pipelined `HGETALL` + `LRANGE` + `DELETE`.
 
-**`session_stats[session_id]` schema:**
+**`mcp:session_stats:{session_id}` Redis hash schema** (formerly the
+`session_stats[session_id]` dict — same fields, same names, now persisted as
+hash fields with a 24h TTL instead of dict keys in process memory; values are
+read back coerced to int/float by the accessors in `redis_session_stats.py`,
+mirroring the original types):
 
 | Key | Type | Purpose |
 |---|---|---|
 | `tool_count` | int | Total successful tool calls this session |
 | `error_count` | int | Tool calls that raised an exception |
 | `degraded_count` | int | Tool calls that returned an error_type |
-| `session_start_time` | float | `time.perf_counter()` at session open |
+| `session_start_time` | float | Wall-clock `time.time()` at session open (was `perf_counter()` — switched because the value must be comparable across processes; see `redis_session_stats.py`) |
 | `total_tool_duration_ms` | float | Cumulative tool execution time |
 | `total_estimated_input_tokens` | int | Sum of prompt token estimates |
 | `total_estimated_output_tokens` | int | Sum of output token estimates |
-| `last_tool_end_perf` | float \| None | `perf_counter()` when the last tool finished |
+| `last_tool_end_perf` | float \| None | Wall-clock `time.time()` when the last tool finished (same cross-process rationale as `session_start_time`) |
 | `client_name` | str \| None | From `identify_mcp_client()`, set on first tool call |
 | `session_trace_id` | str | NR trace.id from the SSE open transaction |
-| `tool_sequence` | list[str] | Ordered list of tool names called |
+| `tool_sequence` | list[str] | Stored as a separate Redis list `mcp:session_stats:{id}:tool_sequence`, not a hash field — Redis hashes can't hold lists |
 | `create_op_count` | int | CMS create-bucket mutation count — create_*/register_*/add_*/submit_* (capped at 100 per session) |
 | `update_delete_op_count` | int | CMS update/delete-bucket mutation count — update_*/delete_* (capped at 100 per session) |
+
+`None` values are stored using the sentinel `""` (`_NONE` in
+`redis_session_stats.py`) since Redis hashes cannot hold `None` directly, and
+translated back to `None` on read.
 
 ---
 
@@ -469,22 +495,23 @@ Routes on `body["method"]`:
        record_metric("Custom/MCP/tool_validation_error_count", 1)
        return jsonrpc_ok(id_, {"content": [...], "isError": True})   # tool NOT called
 
-5. # Session timeline — only populated for SSE sessions (session_stats has an entry);
-   # HTTP-transport calls have no entry, so start_offset_ms/ai_think_ms stay None
-   with session_stats_lock:
-       stats = session_stats.get(session_id or "")
-       # compute start_offset_ms, ai_think_ms, set client_name on first call
+5. # Session timeline — only populated for SSE sessions (the session has a Redis
+   # stats hash); HTTP-transport calls have no hash, so start_offset_ms/ai_think_ms
+   # stay None. get_timeline_and_set_client_name() does the compound read +
+   # conditional client_name write atomically server-side via a Redis pipeline,
+   # guarded by an `exists` check so HTTP-stateless sessions never get a phantom
+   # hash created just to hold client_name.
+   timeline = get_timeline_and_set_client_name(session_id or "", user_agent)
+   # → {session_start_time, last_tool_end_perf, client_name, session_trace_id}; computes
+   #   start_offset_ms, ai_think_ms from the (now wall-clock, cross-process-comparable) timestamps
 
 6. if _is_cms_write(name):                      # name not in _CMS_READ_PREFIXES = (list_, get_, validate_)
        bucket      = _cms_write_bucket(name)    # "update_delete" for update_*/delete_*, else "create"
        counter_key = "create_op_count" if bucket == "create" else "update_delete_op_count"
-       with session_stats_lock:
-           write_stats = session_stats.get(session_id or "")
-           if write_stats is not None:
-               write_stats[counter_key] += 1
-               bucket_op_count = write_stats[counter_key]
-           else:
-               bucket_op_count = 0         # HTTP/stateless sessions: counter never increments
+       bucket_op_count = increment(session_id or "", counter_key) or 0
+       # HINCRBY mcp:session_stats:{id} {counter_key} 1 — atomic, correct under concurrent
+       # processes (not just threads); returns None for HTTP/stateless sessions (no hash
+       # exists), so bucket_op_count stays 0 and the counter never increments for that transport
        if bucket_op_count > 100:
            label = "Create" if bucket == "create" else "Update/delete"
            return jsonrpc_ok(id_, {"content": [{"type": "text", "text": json.dumps({
@@ -502,8 +529,10 @@ Routes on `body["method"]`:
 
 8. degraded_reason = result.get("error") or result.get("error_type")  (if dict)
    is_degraded = bool(degraded_reason)
-   # update session_stats (duration, token estimates, last_tool_end_perf, tool_sequence,
-   # degraded_count); add_attrs + record_metric for success vs degraded; emit
+   # update the session's Redis stats hash via increment()/set_field()/append_tool_sequence()
+   # — duration (HINCRBYFLOAT total_tool_duration_ms), token estimates, last_tool_end_perf
+   # (wall-clock time.time(), set_field), tool_sequence (RPUSH to the separate list),
+   # degraded_count (HINCRBY); add_attrs + record_metric for success vs degraded; emit
    # MCPToolDegraded if degraded
    return jsonrpc_ok(id_, {"content": [{"type": "text", "text": output_text}]})
    # NOTE: degraded responses still return isError-less content — the AI sees the
@@ -530,16 +559,33 @@ Routes on `body["method"]`:
 
 ## `mcp_app/transport/sse.py`
 
-### In-process state
+### Session/queue state — now Redis-backed
 
 ```python
-_sse_sessions: dict[str, tuple[queue.Queue, dict, object]] = {}
-# session_id → (msg_queue, credentials, token_expires_at)
-_sse_sessions_lock: threading.Lock = ...
 _MCP_QUEUE_MAXSIZE = int(os.environ.get("MCP_QUEUE_MAXSIZE", "100"))
 ```
 
-This dict lives in the gunicorn worker's memory. **Requires exactly 1 worker** (`-w 1`) — see `docs/deployment.md`.
+The session registry and per-session message queue used to be an in-process
+dict (`_sse_sessions: dict[session_id → (queue.Queue, credentials,
+token_expires_at)]`) plus a `threading.Lock`, living in the gunicorn worker's
+memory — which is what forced **exactly 1 worker** (`-w 1`; see
+`docs/deployment.md`). Both are now externalized to Redis:
+
+- **Registry** — `mcp_app/transport/redis_session_store.py`: `register_session`/
+  `get_session`/`close_session`, backed by `mcp:session:{id}` (credentials
+  Fernet-encrypted with the same `encrypt_json`/`CREDENTIALS_ENCRYPTION_KEY` used
+  for `EncryptedJSONField` in Postgres — see the module docstring's security
+  rationale) plus a `mcp:active_sessions` set for O(1) `SCARD` cluster-wide counts.
+- **Queue** — `mcp_app/transport/redis_message_queue.py`: `push_message`/
+  `pop_message`/`delete_queue`/`queue_depth`, backed by a capped Redis list
+  `mcp:session_queue:{id}` consumed via `BLPOP` (chosen over Pub/Sub — drops
+  messages for momentarily-disconnected subscribers — and over Streams —
+  unneeded consumer-group machinery for a strict 1-producer/1-consumer pattern).
+
+Any worker/replica sharing the same `REDIS_URL` can now look up a session or
+push/pop its queue — `GET /mcp` and `POST /mcp/message` no longer need to land
+on the same process. `_MCP_QUEUE_MAXSIZE` stays in `sse.py` and is passed
+through to `push_message(..., maxsize=_MCP_QUEUE_MAXSIZE)`.
 
 ### `open_sse_connection(request, credentials, token_expires_at) → StreamingHttpResponse`
 
@@ -549,27 +595,30 @@ This dict lives in the gunicorn worker's memory. **Requires exactly 1 worker** (
    add_attrs([mcp.transport="sse", mcp.session_id, mcp.thread_active_count]); _add_session_protocol_attrs(...)
    client_name, _ = identify_mcp_client(request)
 
-2. msg_queue = queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE)   # MCP_QUEUE_MAXSIZE env var, default 100
-3. _sse_sessions[session_id] = (msg_queue, credentials, token_expires_at)
-4. session_trace_id = get_linking_metadata()["trace.id"]
-   session_stats[session_id] = {tool_count: 0, ..., "session_trace_id": session_trace_id, ...}  # full schema above
-   record_custom_metric("Custom/MCP/active_sessions", len(_sse_sessions))
-5. record_event("SSESessionOpen", {session_id, publisher_id, active_threads, active_sessions, trace_id, span_id, ...})
-6. post_url = f"{BASE_URL}/mcp/message?sessionId={session_id}"
+2. active_on_open = register_session(session_id, credentials, token_expires_at)
+   # SET mcp:session:{id} {encrypted credentials, token_expires_at} EX 24h
+   # SADD mcp:active_sessions {id}; SCARD → active_on_open   (all in one pipeline)
+3. session_trace_id = get_linking_metadata()["trace.id"]
+   init_stats(session_id, session_trace_id)   # HSET mcp:session_stats:{id} {...}; full schema above
+   record_custom_metric("Custom/MCP/active_sessions", active_on_open)
+4. record_event("SSESessionOpen", {session_id, publisher_id, active_threads, active_sessions, trace_id, span_id, ...})
+5. post_url = f"{BASE_URL}/mcp/message?sessionId={session_id}"
    yield f"event: endpoint\ndata: {post_url}\n\n"
-7. Loop:
-     try:
-         enqueue_t, msg = msg_queue.get(timeout=25)
-         if entry is None: break
-         record_custom_metric("Custom/MCP/queue_wait_ms", (now - enqueue_t) * 1000)
-         yield f"event: message\ndata: {json.dumps(msg)}\n\n"
-     except queue.Empty:
+6. Loop:
+     popped = pop_message(session_id, timeout=25)   # BLPOP mcp:session_queue:{id} 25
+     if popped is None:
          yield ": keepalive\n\n"    # keep proxy/LB from closing idle connection
-8. finally (on disconnect): _close_sse_session(session_id, publisher_id, stream_t0)
-     # pops _sse_sessions + session_stats, computes duration_ms and server_work_pct,
-     # records Custom/MCP/active_sessions (post-close count), and — in this order —
-     # emits MCPSessionAbandoned (only if tool_count == 0), then always
-     # MCPSessionSummary, then SSESessionClose
+         continue
+     wait_ms, msg = popped
+     record_custom_metric("Custom/MCP/queue_wait_ms", wait_ms)
+     yield f"event: message\ndata: {json.dumps(msg)}\n\n"
+7. finally (on disconnect): _close_sse_session(session_id, publisher_id, stream_t0)
+     # close_session() (DEL mcp:session:{id}; SREM + SCARD mcp:active_sessions),
+     # delete_queue() (DEL mcp:session_queue:{id}), pop_stats() (atomic
+     # HGETALL+LRANGE+DELETE snapshot of the stats hash + tool_sequence list);
+     # computes duration_ms and server_work_pct, records Custom/MCP/active_sessions
+     # (post-close count), and — in this order — emits MCPSessionAbandoned (only
+     # if tool_count == 0), then always MCPSessionSummary, then SSESessionClose
 ```
 
 ### `handle_sse_message(request) → HttpResponse`
@@ -581,41 +630,50 @@ This dict lives in the gunicorn worker's memory. **Requires exactly 1 worker** (
    client_name, client_version = identify_mcp_client(request)
    add_attrs([mcp.client_name, mcp.client_version])
 
-2. session_entry = _sse_sessions.get(session_id)
-   if session_entry is None:
+2. session_entry = get_session(session_id)   # GET mcp:session:{id}; decrypt_json; refresh TTL
+   if session_entry is None:                  # absent, expired, or undecryptable → forces reconnect
        add_attrs([("mcp.sse_session_missing", True)])
        record_metric("Custom/MCP/sse_session_missing_count", 1)
        record_event("MCPSessionMissing", {...})
        return JsonResponse({"error": "No active MCP session."}, status=400)
 
-3. (msg_queue, credentials, token_expires_at) = session_entry
-   # attach mcp.session_trace_id from session_stats[session_id], if present
+3. (credentials, token_expires_at) = session_entry
+   session_trace_id = get_field(session_id, "session_trace_id")  # HGET mcp:session_stats:{id} session_trace_id
+   # attach mcp.session_trace_id, if present
 
 4. body = json.loads(request.body)        # malformed JSON → 400 "Invalid JSON"
 
 5. if body["method"] == "tools/call":
-       with session_stats_lock:
-           stats["tool_count"] += 1; seq = stats["tool_count"]
+       seq = increment(session_id, "tool_count")   # HINCRBY mcp:session_stats:{id} tool_count 1
        add_attrs([("mcp.session_tool_seq", seq)])
 
 6. response_msg = dispatch_jsonrpc(body, credentials, request, session_id, token_expires_at)
    if it's a tools/call response with isError == True:
-       with session_stats_lock: stats["error_count"] += 1
+       increment(session_id, "error_count")        # HINCRBY mcp:session_stats:{id} error_count 1
 
 7. if response_msg is not None:
-       msg_queue.put((time.perf_counter(), response_msg), block=True, timeout=30.0)
-       # NOTE: the queue stores a (enqueue_timestamp, response_dict) TUPLE — not
-       # json.dumps(response) — so the consumer in event_stream() can compute
-       # Custom/MCP/queue_wait_ms from the timestamp before serializing to SSE.
-       # If full after 30s: record_metric("Custom/MCP/queue_overflow_count", 1),
-       # add_attrs([("mcp.queue_overflow", True)]), log error, return {"ok": True} early
-       # (the response is dropped — the client never receives it)
-       else: record mcp.session_queue_depth attr + Custom/MCP/session_queue_depth metric
+       ok = push_message(session_id, response_msg, maxsize=_MCP_QUEUE_MAXSIZE, timeout=30.0)
+       # RPUSH mcp:session_queue:{id} json.dumps([time.time(), response_msg]); EXPIRE
+       # — wall-clock time.time(), not perf_counter(): producer (this POST handler)
+       # and consumer (event_stream(), possibly a different process) must agree on
+       # a comparable clock. Polls LLEN with backoff (Redis has no blocking-push
+       # primitive) — a soft cap, same tolerance the in-process bounded queue had
+       # under concurrent producers.
+       if not ok:
+           record_metric("Custom/MCP/queue_overflow_count", 1)
+           add_attrs([("mcp.queue_overflow", True)]); log error
+           return JsonResponse({"ok": True})   # response dropped — client never receives it
+       depth = queue_depth(session_id)   # LLEN mcp:session_queue:{id}
+       record mcp.session_queue_depth attr + Custom/MCP/session_queue_depth metric
 
 8. return JsonResponse({"ok": True})
 ```
 
-The `JsonResponse({"ok": True})` is an ACK only. The real response travels back on the SSE stream — `event_stream()` pulls `(timestamp, response_dict)` off the queue, computes queue-wait time from the timestamp, and serializes `response_dict` to the `event: message` payload.
+The `JsonResponse({"ok": True})` is an ACK only. The real response travels back
+on the SSE stream — `event_stream()` calls `pop_message()`, which `BLPOP`s the
+`[enqueued_at, response_dict]` JSON payload off the Redis list, computes
+`queue_wait_ms` from the wall-clock timestamp, and returns
+`(queue_wait_ms, response_dict)` for serialization to the `event: message` payload.
 
 ---
 
@@ -832,9 +890,10 @@ name in CMS_TOOL_NAMES and not any(name.startswith(p) for p in ("list_", "get_",
 ```
 
 `_cms_write_bucket(name)` then splits these into two independent 100-op-per-session
-caps: `update_*`/`delete_*` calls count against `session_stats["update_delete_op_count"]`,
-everything else (`create_*`, `register_*`, `add_*`, `submit_*`) counts against
-`session_stats["create_op_count"]`.
+caps: `update_*`/`delete_*` calls count against the `update_delete_op_count`
+field on the session's Redis stats hash (`mcp:session_stats:{id}`, via
+`increment()`), everything else (`create_*`, `register_*`, `add_*`, `submit_*`)
+counts against the `create_op_count` field.
 
 ---
 

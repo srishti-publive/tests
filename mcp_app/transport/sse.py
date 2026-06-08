@@ -7,7 +7,6 @@ Handles:
 import json
 import logging
 import os
-import queue
 import threading
 import time
 import uuid
@@ -29,14 +28,27 @@ from mcp_app.nr_utils import (
 from mcp_app.protocol.auth import identify_mcp_client
 from mcp_app.protocol.dispatch import dispatch_jsonrpc
 from mcp_app.protocol.session import SESSION_PROTOCOL_KEY
-from mcp_app.protocol.session_store import session_stats, session_stats_lock
+from mcp_app.protocol.session_store import (
+    get_field,
+    increment,
+    init_stats,
+    pop_stats,
+)
+from mcp_app.transport.redis_message_queue import delete_queue, pop_message, push_message, queue_depth
+from mcp_app.transport.redis_session_store import (
+    close_session,
+    get_session,
+    register_session,
+)
 
 logger = logging.getLogger(__name__)
 
-# SSE message queues: session_id → (Queue, credentials, token_expires_at)
-_sse_sessions: dict[str, tuple[queue.Queue, dict, object]] = {}
-_sse_sessions_lock = threading.Lock()
-
+# Per-session message delivery and the session registry now live in Redis (see
+# redis_session_store.py / redis_message_queue.py) — shared across every
+# worker/replica, which is what lets `GET /mcp` and `POST /mcp/message` for the
+# same session land on different processes. Previously an in-process dict
+# (`_sse_sessions`) + per-session `queue.Queue`, which pinned the app to exactly
+# one gunicorn worker (see docs/deployment.md, docs/mcp-protocol.md).
 _MCP_QUEUE_MAXSIZE = int(os.environ.get("MCP_QUEUE_MAXSIZE", "100"))
 
 
@@ -71,31 +83,12 @@ def open_sse_connection(request, credentials: dict, token_expires_at):
         session_id, publisher_id, active_threads,
     )
 
-    msg_queue: queue.Queue = queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE)
-
-    with _sse_sessions_lock:
-        _sse_sessions[session_id] = (msg_queue, credentials, token_expires_at)
-        active_on_open            = len(_sse_sessions)
+    active_on_open = register_session(session_id, credentials, token_expires_at)
 
     open_linking     = get_linking_metadata()
     session_trace_id = open_linking.get("trace.id", "")
 
-    with session_stats_lock:
-        session_stats[session_id] = {
-            "tool_count":                    0,
-            "error_count":                   0,
-            "degraded_count":                0,
-            "session_start_time":            time.perf_counter(),
-            "total_tool_duration_ms":        0.0,
-            "total_estimated_input_tokens":  0,
-            "total_estimated_output_tokens": 0,
-            "last_tool_end_perf":            None,
-            "client_name":                   None,
-            "session_trace_id":              session_trace_id,
-            "tool_sequence":                 [],
-            "create_op_count":               0,
-            "update_delete_op_count":        0,
-        }
+    init_stats(session_id, session_trace_id)
 
     newrelic.agent.record_custom_metric("Custom/MCP/active_sessions", active_on_open)
     add_attrs([("mcp.active_sessions", active_on_open), ("mcp.session_trace_id", session_trace_id)])
@@ -120,16 +113,13 @@ def open_sse_connection(request, credentials: dict, token_expires_at):
         yield f"event: endpoint\ndata: {post_url}\n\n"
         try:
             while True:
-                try:
-                    entry = msg_queue.get(timeout=25)
-                    if entry is None:
-                        break
-                    enqueue_t, msg = entry
-                    wait_ms = round((time.perf_counter() - enqueue_t) * 1000, 2)
-                    newrelic.agent.record_custom_metric("Custom/MCP/queue_wait_ms", wait_ms)
-                    yield f"event: message\ndata: {json.dumps(msg)}\n\n"
-                except queue.Empty:
+                popped = pop_message(session_id, timeout=25)
+                if popped is None:
                     yield ": keepalive\n\n"
+                    continue
+                wait_ms, msg = popped
+                newrelic.agent.record_custom_metric("Custom/MCP/queue_wait_ms", wait_ms)
+                yield f"event: message\ndata: {json.dumps(msg)}\n\n"
         finally:
             _close_sse_session(session_id, publisher_id, stream_t0)
 
@@ -143,12 +133,10 @@ def _close_sse_session(session_id: str, publisher_id: str, stream_t0: float) -> 
     """Tear down session state and emit close-event observability."""
     duration_ms = round((time.perf_counter() - stream_t0) * 1000, 2)
 
-    with _sse_sessions_lock:
-        _sse_sessions.pop(session_id, None)
-        active_on_close = len(_sse_sessions)
+    active_on_close = close_session(session_id)
+    delete_queue(session_id)
 
-    with session_stats_lock:
-        stats = session_stats.pop(session_id, {})
+    stats = pop_stats(session_id)
 
     tool_count              = stats.get("tool_count",                    0)
     tool_error_count        = stats.get("error_count",                   0)
@@ -236,8 +224,7 @@ def handle_sse_message(request) -> HttpResponse:
     client_name, client_version = identify_mcp_client(request)
     add_attrs([("mcp.client_name", client_name), ("mcp.client_version", client_version)])
 
-    with _sse_sessions_lock:
-        session_entry = _sse_sessions.get(session_id)
+    session_entry = get_session(session_id)
 
     if session_entry is None:
         logger.warning("handle_sse_message: no active SSE session: session_id=%s", session_id)
@@ -250,11 +237,9 @@ def handle_sse_message(request) -> HttpResponse:
         })
         return JsonResponse({"error": "No active MCP session."}, status=400)
 
-    msg_queue, credentials, token_expires_at = session_entry
+    credentials, token_expires_at = session_entry
 
-    with session_stats_lock:
-        msg_stats = session_stats.get(session_id) or {}
-    session_trace_id = msg_stats.get("session_trace_id", "")
+    session_trace_id = get_field(session_id, "session_trace_id") or ""
     if session_trace_id:
         add_attrs([("mcp.session_trace_id", session_trace_id)])
 
@@ -266,13 +251,7 @@ def handle_sse_message(request) -> HttpResponse:
 
     body_method = body.get("method", "") if isinstance(body, dict) else ""
     if body_method == "tools/call":
-        with session_stats_lock:
-            stats = session_stats.get(session_id)
-            if stats is not None:
-                stats["tool_count"] += 1
-                seq = stats["tool_count"]
-            else:
-                seq = 0
+        seq = increment(session_id, "tool_count") or 0
         if seq:
             add_attrs([("mcp.session_tool_seq", seq)])
 
@@ -285,15 +264,11 @@ def handle_sse_message(request) -> HttpResponse:
             and isinstance(response_msg.get("result"), dict)
             and response_msg["result"].get("isError")
         ):
-            with session_stats_lock:
-                stats = session_stats.get(session_id)
-                if stats is not None:
-                    stats["error_count"] += 1
+            increment(session_id, "error_count")
 
         if response_msg is not None:
-            try:
-                msg_queue.put((time.perf_counter(), response_msg), block=True, timeout=30.0)
-            except queue.Full:
+            ok = push_message(session_id, response_msg, maxsize=_MCP_QUEUE_MAXSIZE, timeout=30.0)
+            if not ok:
                 record_metric("Custom/MCP/queue_overflow_count", 1)
                 add_attrs([("mcp.queue_overflow", True)])
                 logger.error(
@@ -301,9 +276,9 @@ def handle_sse_message(request) -> HttpResponse:
                     _MCP_QUEUE_MAXSIZE, session_id,
                 )
                 return JsonResponse({"ok": True})
-            queue_depth = msg_queue.qsize()
-            add_attrs([("mcp.session_queue_depth", queue_depth)])
-            newrelic.agent.record_custom_metric("Custom/MCP/session_queue_depth", queue_depth)
+            depth = queue_depth(session_id)
+            add_attrs([("mcp.session_queue_depth", depth)])
+            newrelic.agent.record_custom_metric("Custom/MCP/session_queue_depth", depth)
 
         return JsonResponse({"ok": True})
     except Exception:
