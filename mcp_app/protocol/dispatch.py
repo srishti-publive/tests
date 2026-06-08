@@ -135,11 +135,22 @@ def classify_tool_error(exc) -> str:
     return "system_error"
 
 
-_CMS_READ_PREFIXES = ("list_", "get_", "validate_")
+_CMS_READ_PREFIXES   = ("list_", "get_", "validate_")
+_CMS_MUTATE_PREFIXES = ("update_", "delete_")
 
 def _is_cms_write(name: str) -> bool:
     """True for CMS tools that mutate data (create / update / delete / register / add / submit)."""
     return name in CMS_TOOL_NAMES and not any(name.startswith(p) for p in _CMS_READ_PREFIXES)
+
+
+def _cms_write_bucket(name: str) -> str:
+    """Classify a CMS write tool into a per-session rate-limit bucket.
+
+    update_*/delete_* share an "update_delete" bucket; everything else that
+    mutates data (create_*, register_*, add_*, submit_*) shares a "create"
+    bucket — each bucket gets its own independent cap.
+    """
+    return "update_delete" if name.startswith(_CMS_MUTATE_PREFIXES) else "create"
 
 
 def _record_client_attrs(request) -> None:
@@ -293,19 +304,24 @@ def _handle_tool_call(body: dict, credentials: dict, request, session_id, id_) -
     if ai_think_ms is not None:
         add_attrs([("mcp.ai_think_time_ms", ai_think_ms)])
 
-    # Per-session CMS write-op rate limit (SSE sessions only)
+    # Per-session CMS write-op rate limits (SSE sessions only) — independent
+    # 100-op caps for "create" (create_*/register_*/add_*/submit_*) and
+    # "update_delete" (update_*/delete_*) so each bucket runs out on its own.
     if _is_cms_write(name):
+        bucket      = _cms_write_bucket(name)
+        counter_key = "create_op_count" if bucket == "create" else "update_delete_op_count"
         with session_stats_lock:
             write_stats = session_stats.get(session_id or "")
             if write_stats is not None:
-                write_stats["write_op_count"] += 1
-                write_op_count = write_stats["write_op_count"]
+                write_stats[counter_key] += 1
+                bucket_op_count = write_stats[counter_key]
             else:
-                write_op_count = 0
-        if write_op_count > 50:
+                bucket_op_count = 0
+        if bucket_op_count > 100:
+            label = "Create" if bucket == "create" else "Update/delete"
             return jsonrpc_ok(id_, {"content": [{"type": "text", "text": json.dumps({
                 "error_type": "rate_limit",
-                "message": "Write operation limit (50) reached for this session. Start a new session to continue making changes.",
+                "message": f"{label} operation limit (100) reached for this session. Start a new session to continue making changes.",
                 "retryable": False,
             })}]})
 

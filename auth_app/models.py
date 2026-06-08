@@ -5,11 +5,8 @@ from .fields import EncryptedJSONField
 
 
 class OAuthClient(models.Model):
-    """A dynamically-registered OAuth 2.0 client (one per AI client install).
-
-    Created when Claude Desktop / Cursor / ChatGPT calls POST /register.
-    Used to validate client_id + redirect_uri during the /authorize step.
-    Registrations are permanent — OAuthToken handles token expiry.
+    """
+    A dynamically-registered OAuth 2.0 client (one per AI client install).
     """
 
     client_id    = models.CharField(max_length=64, unique=True, db_index=True)
@@ -41,14 +38,9 @@ class OAuthCode(models.Model):
 
 
 class OAuthToken(models.Model):
-    """Long-lived bearer token issued after successful PKCE auth.
-
+    """
+    Long-lived bearer token issued after successful PKCE auth.
     credentials stores {publisherId, apiKey, apiSecret} — the Publive API credentials
-    delegated by the user. JSONField because the structure is fixed but must travel
-    as an opaque blob through resolve_credentials() to every tool call.
-
-    Upsert pattern: same client_id + publisherId always returns the same token
-    (stable identity across re-authorisations). refresh_token rotates on each use.
     """
 
     token         = models.CharField(max_length=128, unique=True)

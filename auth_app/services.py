@@ -1,6 +1,7 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
 # redirect-URI allowlisting, CDS credential verification, session TTL checks,
 # and session credential encryption/decryption.
+
 import base64
 import json
 import logging
@@ -49,18 +50,12 @@ def set_session_credentials(session, credentials: dict) -> None:
 def check_session_ttl(session) -> bool:
     """Return True if the session has exceeded its original TTL.
 
-    ttl_seconds == -1  → "Always" session, never expires.
-    ttl_seconds == 0   → browser-session; expiry is browser-controlled.
-    ttl_seconds  > 0   → absolute deadline from session_created_at.
-
-    session_created_at is stored as a Unix integer timestamp (int(timezone.now().timestamp()))
-    to avoid Python 3.9 fromisoformat limitations with timezone-aware ISO strings.
 
     Django's rolling SESSION_SAVE_EVERY_REQUEST is intentionally disabled so
     these stored values are the authoritative expiry source.
     """
     ttl_seconds = session.get("session_ttl_seconds", -1)
-    if ttl_seconds <= 0:  # always (-1) or browser-session (0) → not expired here
+    if ttl_seconds <= 0: 
         return False
     created_at_ts = session.get("session_created_at")
     if not created_at_ts:

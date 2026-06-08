@@ -35,7 +35,7 @@ Emitted on every `tools/call`. Captures what the user/LLM asked and links it to 
 |---|---|
 | `prompt_id` | UUID; joins this event to `MCPToolError`/`MCPToolDegraded` for the same call |
 | `prompt_text` | Extracted user prompt (truncated to 2000 chars) |
-| `prompt_source` | Where the prompt came from: `header`, `meta.prompt`, `arguments._prompt`, `tool_args`, `client_not_provided` |
+| `prompt_source` | Where the prompt came from, in priority order: `header` → `meta.prompt`/`meta.userMessage`/`meta.user_message`/`meta.message` → `params.prompt` → `arguments._prompt`/`arguments.prompt` → `tool_args` (JSON snapshot fallback) → `client_not_provided` (no prompt or arguments at all) |
 | `tool_name` | Which tool was called |
 | `publisher_id` | Publisher making the call |
 | `estimated_prompt_tokens` | `char_count ÷ 4` — cost proxy without a tokenizer dependency |
@@ -107,24 +107,34 @@ All metrics follow the `Custom/` prefix required by New Relic for custom metric 
 | `Custom/MCP/tool_error_count` | Hard failures |
 | `Custom/MCP/tool_degraded_count` | Soft failures (upstream API errors) |
 | `Custom/MCP/tool_validation_error_count` | Calls rejected by inputSchema validation |
-| `Custom/MCP/active_sessions` | SSE sessions open right now |
+| `Custom/MCP/active_sessions` | SSE sessions open right now (recorded on both open and close) |
 | `Custom/MCP/session_abandon_count` | Sessions that closed with 0 tool calls |
 | `Custom/MCP/queue_wait_ms` | Time a message waited in the SSE queue before delivery |
+| `Custom/MCP/queue_overflow_count` | A session's SSE message queue was full and a message was dropped |
+| `Custom/MCP/sse_session_missing_count` | `POST /mcp/message` arrived for an unknown/expired `sessionId` |
 | `Custom/MCP/prompt_event_dropped_count` | `MCPPrompt` events dropped due to NR queue pressure |
 | `Custom/Tool/<name>/call_count` | Per-tool call count |
+| `Custom/Tool/<name>/active_calls` | Per-tool concurrency gauge — how many calls to this tool are in flight right now |
 | `Custom/Tool/<name>/duration_ms` | Per-tool latency (success path) |
 | `Custom/Tool/<name>/error_count` | Per-tool hard failures |
+| `Custom/Tool/<name>/error_duration_ms` | Per-tool latency on the hard-failure path (separate from the success-path duration) |
 | `Custom/Tool/<name>/degraded_count` | Per-tool soft failures |
 | `Custom/CDS/latency_ms` | CDS API response time |
+| `Custom/CDS/response_size_bytes` | CDS API response payload size |
 | `Custom/CDS/timeout_count` | CDS timeouts |
 | `Custom/CDS/error_count` | CDS errors (after retry) |
 | `Custom/CDS/retry_count` | CDS retry attempts |
 | `Custom/CMS/latency_ms` | CMS API response time |
+| `Custom/CMS/response_size_bytes` | CMS API response payload size |
 | `Custom/CMS/timeout_count` | CMS timeouts |
 | `Custom/CMS/error_count` | CMS errors |
-| `Custom/Auth/client_registered_count` | OAuth client registrations |
+| `Custom/Auth/client_registered_count` | OAuth client registrations (`POST /register`) |
 | `Custom/Auth/auth_failure_count` | Auth failures (all flows) |
-| `Custom/Auth/token_refresh_count` | Token refresh operations |
+| `Custom/Auth/token_issued_count` | New `OAuthToken` rows created (excludes upsert reuse) |
+| `Custom/Auth/token_refresh_count` | Token refresh operations (`grant_type=refresh_token`) |
+| `Custom/Auth/token_revoked_count` | `POST /revoke` calls that matched and deleted a token |
+| `Custom/Auth/session_login_count` | Successful browser logins (`POST /auth/login`) |
+| `Custom/Auth/session_logout_count` | Browser logouts (`POST /auth/logout`) |
 
 ---
 

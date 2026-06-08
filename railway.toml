@@ -7,7 +7,7 @@ builder = "dockerfile"
 # release phase can't silently block the deploy. No startCommand override here, so
 # the Dockerfile CMD is the single start path.
 # Root endpoint is dependency-free (no DB, no session) so the healthcheck reflects
-# pure process liveness rather than the auth/session layer.
+
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"

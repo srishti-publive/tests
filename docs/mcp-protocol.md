@@ -2,7 +2,7 @@
 
 ## What this server implements
 
-Model Context Protocol (MCP) version `2024-11-05`. The server exposes 40 tools (15 CDS read + 25 CMS write) to AI clients over two transports. It speaks JSON-RPC 2.0 over both.
+Model Context Protocol (MCP) version `2024-11-05`. The server exposes 61 tools (22 CDS read + 39 CMS write) to AI clients over two transports. It speaks JSON-RPC 2.0 over both.
 
 ---
 
@@ -156,7 +156,7 @@ Every `tools/call` goes through this sequence in `_handle_tool_call()`:
 1. extract_prompt_for_tool_call()   — extract user prompt from headers/meta/args
 2. record_prompt_observability()    — emit MCPPrompt NR event (rate-limited to 1000/min)
 3. _validate_tool_args()            — check required fields + type constraints vs inputSchema
-4. CMS write-op rate limit check    — max 50 CMS mutations per SSE session
+4. CMS write-op rate limit check    — max 100 creates + 100 update/deletes per SSE session (independent buckets)
 5. dispatch_cds_tool() or           — call the actual tool handler
    dispatch_cms_tool()
 6. Degraded check                   — result dict with error_type key → MCPToolDegraded
@@ -176,9 +176,15 @@ A validation failure returns `isError: true` to the client **without calling the
 
 ### Step 4: CMS write-op rate limit
 
-CMS write tools (create/update/delete — anything that isn't `list_*`, `get_*`, `validate_*`) are counted per SSE session. After 50 writes, subsequent writes return a rate-limit error. The limit is per-session, not per-publisher or per-minute, so a new session resets it.
+CMS write tools (anything that isn't `list_*`, `get_*`, `validate_*`) are split into two independent per-SSE-session buckets by `_cms_write_bucket()`:
+- **create** — `create_*`, `register_*`, `add_*`, `submit_*` → `session_stats[id]["create_op_count"]`
+- **update_delete** — `update_*`, `delete_*` → `session_stats[id]["update_delete_op_count"]`
 
-**Why 50:** Prevents runaway AI agents from bulk-modifying content in a single session. 50 is enough for normal editorial workflows; anything larger is likely an agent loop.
+Each bucket is capped at 100; crossing either cap returns a rate-limit error for *that* bucket only — e.g. hitting 100 creates doesn't block updates/deletes, and vice versa. The limits are per-session, not per-publisher or per-minute, so a new session resets both counters.
+
+**Stateless HTTP transport is not covered by this check.** The counters live in `session_stats[session_id]`, which is only populated when an SSE session opens (`GET /mcp`). `POST /mcp` calls have no `session_stats` entry, so both counters read as `0` on every call and the limits never trigger for that transport.
+
+**Why split + 100:** Prevents runaway AI agents from bulk-modifying content in a single session, while keeping create flows (e.g. bulk-importing posts) from starving update/delete flows (e.g. bulk-editing existing ones) and vice versa. 100 per bucket is generous for normal editorial workflows; anything larger is likely an agent loop.
 
 ### Step 6: Degraded vs error
 

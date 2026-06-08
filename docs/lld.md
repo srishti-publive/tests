@@ -11,7 +11,7 @@ publive_mcp/
   settings/
     base.py          — shared settings, env var defaults
     prod.py          — production overrides (Postgres, Whitenoise, NR)
-    dev.py           — local overrides (SQLite, LocMemCache, DEBUG=True)
+    local.py         — local overrides (SQLite, LocMemCache, DEBUG=True)
   wsgi.py            — WSGI application, New Relic WSGI wrapper
   urls.py            — root URL conf
 
@@ -24,7 +24,7 @@ auth_app/
   migrations/        — 0001–0011 (0011 drops orphan encrypted columns)
 
 mcp_app/
-  views.py           — entry points: mcp_endpoint(), message_endpoint(), healthcheck()
+  views.py           — entry points: health_check(), mcp_endpoint(), mcp_message() — thin routing only, delegates to protocol/ and transport/
   middleware.py      — RateLimitMiddleware, RequestIDMiddleware, SecurityHeadersMiddleware
   nr_utils.py        — guarded New Relic helpers (no-ops when agent absent)
   prompt_capture.py  — extract_prompt_for_tool_call(), record_prompt_observability()
@@ -67,15 +67,15 @@ Every request passes through this chain in `settings.MIDDLEWARE` order:
 
 ```
 1. SecurityMiddleware            (django.middleware.security)
-2. SessionMiddleware             (django.contrib.sessions.middleware)
-3. RequestIDMiddleware           (mcp_app.middleware)   — attaches X-Request-ID
-4. RateLimitMiddleware           (mcp_app.middleware)   — sliding-window rate limit
+2. WhiteNoiseMiddleware          (whitenoise.middleware)        — serves collected static files
+3. RequestIDMiddleware           (mcp_app.middleware)           — attaches X-Request-ID
+4. SessionMiddleware             (django.contrib.sessions.middleware)
 5. CommonMiddleware              (django.middleware.common)
-6. MessageMiddleware             (django.contrib.messages.middleware)
-7. SecurityHeadersMiddleware     (mcp_app.middleware)   — CSP/X-Frame on HTML only
+6. SecurityHeadersMiddleware     (mcp_app.middleware)           — CSP/X-Frame on HTML only
+7. RateLimitMiddleware           (mcp_app.middleware)           — fixed-window-per-slot rate limit
 ```
 
-MCP endpoints are `@csrf_exempt` so `CsrfViewMiddleware` is absent from the production stack.
+MCP endpoints are `@csrf_exempt` so `CsrfViewMiddleware` is absent from the stack, and there's no `MessageMiddleware` — the auth pages don't use Django's messages framework.
 
 ---
 
@@ -229,49 +229,60 @@ created_at     TIMESTAMPTZ   auto_now_add, null allowed
 
 ### `get_session_credentials(session) → dict | None`
 
+Handles both formats that may exist in `django_session` rows:
+- **Legacy** — `session["credentials"]` is already a plain `dict` (written before encryption was enabled): returned as-is.
+- **Current** — `session["credentials"]` is a Fernet-encrypted `str`: decrypted via `decrypt_json()`.
+
+Returns `None` if the key is absent, or if decryption/JSON-parsing fails (logs a warning and treats the session as expired rather than raising).
+
+### `set_session_credentials(session, credentials: dict)`
+
 ```python
-return session.get("credentials")  # set by set_session_credentials at login
+session["credentials"] = encrypt_json(credentials)
 ```
 
-### `set_session_credentials(session, credentials: dict, remember_for_days: int)`
-
-```python
-session["credentials"] = credentials        # stored as plain dict (session backend encrypts at rest)
-session["session_created_at"] = int(time.time())
-if remember_for_days > 0:
-    session["session_ttl_seconds"] = remember_for_days * 86400
-    session.set_expiry(remember_for_days * 86400)
-elif remember_for_days == -1:               # browser-session only
-    session.set_expiry(0)
-# remember_for_days == 0 → Django controls (SESSION_COOKIE_AGE = 90d)
-```
+Just encrypts and stores — it does **not** take a `remember_for_days` argument and does not touch `session_created_at`/`session_ttl_seconds`/`set_expiry()`. Those three are set directly in `auth_login()` (`auth_app/views.py`), which always writes `session_ttl_seconds = -1` (never expires) and `session.set_expiry(10 * 365 * 24 * 3600)` — a 10-year cookie ceiling. There is no per-login configurable TTL; `remember_for_days` does not exist anywhere in the code.
 
 ### `check_session_ttl(session) → bool`
 
-Returns `True` (expired) when:
-1. `session_ttl_seconds > 0` (absolute TTL was set), AND
-2. `time.time() > session["session_created_at"] + session_ttl_seconds`
+```python
+ttl_seconds = session.get("session_ttl_seconds", -1)
+if ttl_seconds <= 0:        # -1 "always" or 0 "browser-session" → never expires here
+    return False
+deadline_ts = int(session["session_created_at"]) + int(ttl_seconds)
+return time.time() > deadline_ts
+```
 
-Returns `False` (not expired) for `ttl_seconds <= 0` (browser-session or Django-controlled).
+Returns `True` (expired) only for sessions with a **positive** `session_ttl_seconds` whose absolute deadline has passed. Since `auth_login()` always writes `-1`, this path is effectively dead for sessions created by the current login flow — it exists to enforce a server-side deadline for any row that does carry a positive TTL (e.g. pre-existing rows), catching cases Django's cookie TTL would miss (`SESSION_SAVE_EVERY_REQUEST` disabled).
 
 ### `check_origin(request) → JsonResponse | None`
 
 Returns `None` (allowed) when:
 - No `Origin` header present — desktop MCP clients never send one.
-- `Origin` is in `settings.OAUTH_ALLOWED_ORIGINS`.
+- `Origin` (after stripping a trailing `/`) is in the allowed set.
 
-Returns `403 JsonResponse` otherwise.
+The allowed set is `settings.OAUTH_ALLOWED_ORIGINS` if defined, **else** the hardcoded default `{"https://claude.ai", "https://api.claude.ai"}` — and `settings.BASE_URL` is *always* added to the set regardless (same-origin is always allowed).
 
-`OAUTH_ALLOWED_ORIGINS` defaults to `[settings.BASE_URL]`. Extend via env var.
+Returns a `403 JsonResponse` (`error: "invalid_origin"`) for any other non-empty `Origin`.
 
-### `parse_oauth_token_body(request) → dict`
+### `is_loopback_redirect_uri(uri) → bool`
 
-Reads `Content-Type`:
-- `application/json` → `json.loads(request.body)`
-- `application/x-www-form-urlencoded` → `request.POST`
-- Other → `request.POST` fallback
+Returns `True` for `http://` URIs whose host is `localhost`, `127.0.0.1`, or `::1` — any port. Exists because native/desktop OAuth clients (RFC 8252 §7.3) bind an ephemeral local port at launch, so exact-string allowlisting is impossible for them.
 
-Returns a plain dict safe for key access.
+### `is_registrable_redirect_uri(uri) → bool`
+
+Returns `True` for `https://<host>/...` URIs, or for any loopback URI (`is_loopback_redirect_uri`). Plain `http://` to a non-loopback host is rejected — it would leak the authorization code over an insecure channel. Per RFC 7591 / OAuth 2.1, dynamic registration doesn't pre-approve specific apps by URL; the only requirement is transport security.
+
+### `redirect_uris_match(requested, registered) → bool`
+
+`True` on an exact string match, **or** when both URIs are loopback URIs that agree on `(scheme, hostname, path)` but differ only by port (RFC 8252 §7.3 requires the server to accept any port for loopback redirects at request time).
+
+### `parse_oauth_token_body(request) → tuple[dict | None, JsonResponse | None]`
+
+Returns `(body, None)` on success or `(None, error_response)` on failure — **not** a bare `dict`. Reads `Content-Type`:
+- `application/json` → `json.loads(request.body)`; rejects non-dict JSON and malformed JSON with a `400 invalid_request`.
+- `application/x-www-form-urlencoded` → `request.POST.dict()`, falling back to manual `parse_qs(request.body)` if `request.POST` is empty (covers bodies Django didn't auto-parse).
+- Anything else → `400 invalid_request` ("Content-Type must be ...").
 
 ### `validate_cds_credentials(publisher_id, api_key, api_secret) → (bool, int)`
 
@@ -283,8 +294,7 @@ resp  = requests.get(f"{base}/posts/", params={"limit": 1},
 return 200 <= resp.status_code < 300, resp.status_code
 ```
 
-Returns `(True, 200)` on success. Returns `(False, status_code)` on any non-2xx.  
-Called once at login/authorize — not on every tool call.
+Decorated with `@newrelic.agent.function_trace(name="validate_cds_auth", group="Auth")`; records `auth.cds_validation_status` / `auth.cds_validation_ms` as transaction attributes via `add_attrs()`. Returns `(True, 200)` on a 2xx, `(False, status_code)` otherwise; raises `requests.RequestException` if CDS is unreachable (caller handles it). Called once at login/authorize — not on every tool call.
 
 ---
 
@@ -311,12 +321,12 @@ Second element is always `None` (tokens have no expiry tracked here).
 
 ### `build_unauthorized_response(request, error_code) → JsonResponse (401)`
 
-Response body:
+Response body — `error_description` is present **only** when `error_code` is a known typed code (currently just `SESSION_EXPIRED`); otherwise the body is just `{authUrl, error: "Not authenticated"}`:
 ```json
 {
   "authUrl": "{BASE_URL}/connect",
   "error": "{error_code | 'Not authenticated'}",
-  "error_description": "{human-readable description}"
+  "error_description": "{present only for typed error codes, e.g. SESSION_EXPIRED}"
 }
 ```
 
@@ -329,7 +339,9 @@ MCP clients parse this header to auto-start the OAuth flow.
 
 ### `identify_mcp_client(request) → (client_name: str, client_version: str)`
 
-Regex: `^([^\s/]+)/([^\s]+)` on `HTTP_USER_AGENT`. Prefix → name lookup via `_CLIENT_NAME_MAP`:
+Regex: `^([^\s/]+)/([^\s]+)` on `HTTP_USER_AGENT`. On a match, the prefix (lowercased) is looked up in `_CLIENT_NAME_MAP`, falling back to the raw prefix string if unmapped, and `client_version` is the regex's second group. If the regex doesn't match but a `User-Agent` is present, it falls back to the first whitespace-separated token (still via `_CLIENT_NAME_MAP`) with `client_version = "unknown"`. No `User-Agent` at all → `("unknown", "unknown")`.
+
+`_CLIENT_NAME_MAP`:
 
 | Prefix | Name |
 |---|---|
@@ -397,7 +409,8 @@ session_stats_lock: threading.Lock = ...
 | `client_name` | str \| None | From `identify_mcp_client()`, set on first tool call |
 | `session_trace_id` | str | NR trace.id from the SSE open transaction |
 | `tool_sequence` | list[str] | Ordered list of tool names called |
-| `write_op_count` | int | CMS mutation count (capped at 50 per session) |
+| `create_op_count` | int | CMS create-bucket mutation count — create_*/register_*/add_*/submit_* (capped at 100 per session) |
+| `update_delete_op_count` | int | CMS update/delete-bucket mutation count — update_*/delete_* (capped at 100 per session) |
 
 ---
 
@@ -413,7 +426,7 @@ _SCHEMA_REGISTRY: dict = {
 }
 ```
 
-### `dispatch_jsonrpc(request, body, credentials, session_id, token_expires_at) → dict | None`
+### `dispatch_jsonrpc(body, credentials, request=None, session_id=None, token_expires_at=None) → dict | None`
 
 Routes on `body["method"]`:
 
@@ -429,51 +442,76 @@ Routes on `body["method"]`:
 
 † Known-unimplemented: `sampling/createMessage`, `roots/list`, `resources/*`, `prompts/*`, `completion/complete`, `logging/setLevel`.
 
-### `_handle_tool_call(request, params, credentials, session_id, body) → dict`
+### `_handle_tool_call(body, credentials, request, session_id, id_) → dict`
 
-**Full pipeline (8 steps):**
+**Actual pipeline, in source order:**
 
 ```
-1. name  = params["name"]
-   args  = params.get("arguments", {})
-   route = "cms" if name in CMS_TOOL_NAMES else "cds"
-
-2. prompt_id, prompt_text, prompt_source, args =
+1. params = body.get("params", {}); name = params.get("name", "")
+   prompt_id, prompt_text, prompt_source, args =
        extract_prompt_for_tool_call(request, body, params)
    # args may have _prompt/prompt stripped
 
-3. if should_emit_prompt_event():
-       record_prompt_observability(...)   # MCPPrompt NR event
+2. if should_emit_prompt_event():
+       record_prompt_observability(...)        # emits MCPPrompt NR event
+   else:
+       add_attrs([mcp.prompt_id, mcp.prompt_text, mcp.prompt_source,
+                  mcp.session_id, mcp.tool_name])
+       record_metric("Custom/MCP/prompt_event_dropped_count", 1)
+       # rate-limited: prompt observability is dropped, but the tool STILL RUNS
 
-4. validation_error = _validate_tool_args(name, args)
+3. add_attrs([mcp.tool_name, mcp.tool_input])
+   record_metric(f"Custom/Tool/{name}/call_count", 1)
+   record_metric("Custom/MCP/tool_call_count", 1)
+
+4. validation_error = _validate_tool_args(name, args or {})
    if validation_error:
        record_metric("Custom/MCP/tool_validation_error_count", 1)
-       return {"content": [{"type":"text","text": error_msg}], "isError": True}
+       return jsonrpc_ok(id_, {"content": [...], "isError": True})   # tool NOT called
 
-5. if route == "cms" and is_write_op(name):
+5. # Session timeline — only populated for SSE sessions (session_stats has an entry);
+   # HTTP-transport calls have no entry, so start_offset_ms/ai_think_ms stay None
+   with session_stats_lock:
+       stats = session_stats.get(session_id or "")
+       # compute start_offset_ms, ai_think_ms, set client_name on first call
+
+6. if _is_cms_write(name):                      # name not in _CMS_READ_PREFIXES = (list_, get_, validate_)
+       bucket      = _cms_write_bucket(name)    # "update_delete" for update_*/delete_*, else "create"
+       counter_key = "create_op_count" if bucket == "create" else "update_delete_op_count"
        with session_stats_lock:
-           if session_stats[session_id]["write_op_count"] >= 50:
-               return rate_limit_error_response
+           write_stats = session_stats.get(session_id or "")
+           if write_stats is not None:
+               write_stats[counter_key] += 1
+               bucket_op_count = write_stats[counter_key]
+           else:
+               bucket_op_count = 0         # HTTP/stateless sessions: counter never increments
+       if bucket_op_count > 100:
+           label = "Create" if bucket == "create" else "Update/delete"
+           return jsonrpc_ok(id_, {"content": [{"type": "text", "text": json.dumps({
+               "error_type": "rate_limit", "message": f"{label} operation limit (100) reached...",
+               "retryable": False})}]})
+   # NOTE: create and update/delete each have an INDEPENDENT 100-op cap, enforced
+   # ONLY for SSE sessions (which carry a session_stats entry). Stateless
+   # HTTP-transport calls always see both counters at 0 and are never rate-limited.
 
-6. t0 = time.perf_counter()
-   result = dispatch_cds_tool(name, credentials, args)
-            or dispatch_cms_tool(name, credentials, args)
-   duration_ms = (time.perf_counter() - t0) * 1000
+7. t0 = time.perf_counter()
+   result = dispatch_cms_tool(credentials, name, args) if name in CMS_TOOL_NAMES \
+            else dispatch_cds_tool(credentials, name, args)
+   duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+   set_txn_name(f"MCP/{name}", group="MCP")
 
-7. if "error_type" in result or "error" in result:
-       # Degraded — tool ran, upstream rejected it
-       record_metric("Custom/MCP/tool_degraded_count", 1)
-       record_event("MCPToolDegraded", {...})
-       return {"content": [{"type":"text","text": format_error(result)}], "isError": False}
+8. degraded_reason = result.get("error") or result.get("error_type")  (if dict)
+   is_degraded = bool(degraded_reason)
+   # update session_stats (duration, token estimates, last_tool_end_perf, tool_sequence,
+   # degraded_count); add_attrs + record_metric for success vs degraded; emit
+   # MCPToolDegraded if degraded
+   return jsonrpc_ok(id_, {"content": [{"type": "text", "text": output_text}]})
+   # NOTE: degraded responses still return isError-less content — the AI sees the
+   # error as text and decides what to do; isError is only set True by validation
+   # failures (step 4) and the exception path below.
 
-8. # Success
-   update session_stats (tool_count, duration, sequence, tokens)
-   record metrics (call_count, success_count, duration_ms)
-   return {"content": [{"type":"text","text": json.dumps(result)}], "isError": False}
-
-   # Exception path (wraps steps 6–8):
-   record_event("MCPToolError", {...})
-   return {"content": [...], "isError": True}
+   # Exception path (wraps steps 7–8):
+   record_event("MCPToolError", {...}); return {"content": [...], "isError": True}
 ```
 
 ### `_validate_tool_args(name: str, args: dict) → dict | None`
@@ -506,69 +544,112 @@ This dict lives in the gunicorn worker's memory. **Requires exactly 1 worker** (
 ### `open_sse_connection(request, credentials, token_expires_at) → StreamingHttpResponse`
 
 ```
-1. session_id = uuid4()
-2. msg_queue  = queue.Queue(maxsize=100)
+1. session_id = str(uuid4())
+   set_txn_name("Transport/SSE", group="Transport"); suppress_apdex(); suppress_trace()
+   add_attrs([mcp.transport="sse", mcp.session_id, mcp.thread_active_count]); _add_session_protocol_attrs(...)
+   client_name, _ = identify_mcp_client(request)
+
+2. msg_queue = queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE)   # MCP_QUEUE_MAXSIZE env var, default 100
 3. _sse_sessions[session_id] = (msg_queue, credentials, token_expires_at)
-4. session_stats[session_id] = {tool_count:0, ...}   # full schema above
-5. record_event("SSESessionOpen", {...})
-6. yield f"event: endpoint\ndata: {BASE_URL}/mcp/message?sessionId={session_id}\n\n"
+4. session_trace_id = get_linking_metadata()["trace.id"]
+   session_stats[session_id] = {tool_count: 0, ..., "session_trace_id": session_trace_id, ...}  # full schema above
+   record_custom_metric("Custom/MCP/active_sessions", len(_sse_sessions))
+5. record_event("SSESessionOpen", {session_id, publisher_id, active_threads, active_sessions, trace_id, span_id, ...})
+6. post_url = f"{BASE_URL}/mcp/message?sessionId={session_id}"
+   yield f"event: endpoint\ndata: {post_url}\n\n"
 7. Loop:
      try:
-         msg = msg_queue.get(timeout=25)
-         yield f"event: message\ndata: {msg}\n\n"
+         enqueue_t, msg = msg_queue.get(timeout=25)
+         if entry is None: break
+         record_custom_metric("Custom/MCP/queue_wait_ms", (now - enqueue_t) * 1000)
+         yield f"event: message\ndata: {json.dumps(msg)}\n\n"
      except queue.Empty:
          yield ": keepalive\n\n"    # keep proxy/LB from closing idle connection
-8. finally (on disconnect):
-     del _sse_sessions[session_id]
-     del session_stats[session_id]
-     record_event("SSESessionClose", {...})
-     record_event("MCPSessionSummary", {...})
-     if tool_count == 0: record_event("MCPSessionAbandoned", {...})
+8. finally (on disconnect): _close_sse_session(session_id, publisher_id, stream_t0)
+     # pops _sse_sessions + session_stats, computes duration_ms and server_work_pct,
+     # records Custom/MCP/active_sessions (post-close count), and — in this order —
+     # emits MCPSessionAbandoned (only if tool_count == 0), then always
+     # MCPSessionSummary, then SSESessionClose
 ```
 
-### `handle_sse_message(request) → JsonResponse`
+### `handle_sse_message(request) → HttpResponse`
 
 ```
-1. session_id = request.GET.get("sessionId")
-2. session    = _sse_sessions.get(session_id)
-   if not session: record_event("MCPSessionMissing"); return 400
+1. raw_sid    = request.GET.get("sessionId", "")
+   session_id = raw_sid or ("anon-" + uuid4().hex[:8])     # missing sessionId → synthetic anon ID
+   add_attrs([mcp.session_id, mcp.thread_active_count, mcp.request_size_bytes])
+   client_name, client_version = identify_mcp_client(request)
+   add_attrs([mcp.client_name, mcp.client_version])
 
-3. (msg_queue, credentials, token_expires_at) = session
-4. response = dispatch_jsonrpc(request, body, credentials, session_id, token_expires_at)
-5. msg_queue.put(json.dumps(response), timeout=30)
-   # If full after 30s: drop response, record_metric("Custom/MCP/queue_overflow_count", 1)
-6. return JsonResponse({"ok": True})
+2. session_entry = _sse_sessions.get(session_id)
+   if session_entry is None:
+       add_attrs([("mcp.sse_session_missing", True)])
+       record_metric("Custom/MCP/sse_session_missing_count", 1)
+       record_event("MCPSessionMissing", {...})
+       return JsonResponse({"error": "No active MCP session."}, status=400)
+
+3. (msg_queue, credentials, token_expires_at) = session_entry
+   # attach mcp.session_trace_id from session_stats[session_id], if present
+
+4. body = json.loads(request.body)        # malformed JSON → 400 "Invalid JSON"
+
+5. if body["method"] == "tools/call":
+       with session_stats_lock:
+           stats["tool_count"] += 1; seq = stats["tool_count"]
+       add_attrs([("mcp.session_tool_seq", seq)])
+
+6. response_msg = dispatch_jsonrpc(body, credentials, request, session_id, token_expires_at)
+   if it's a tools/call response with isError == True:
+       with session_stats_lock: stats["error_count"] += 1
+
+7. if response_msg is not None:
+       msg_queue.put((time.perf_counter(), response_msg), block=True, timeout=30.0)
+       # NOTE: the queue stores a (enqueue_timestamp, response_dict) TUPLE — not
+       # json.dumps(response) — so the consumer in event_stream() can compute
+       # Custom/MCP/queue_wait_ms from the timestamp before serializing to SSE.
+       # If full after 30s: record_metric("Custom/MCP/queue_overflow_count", 1),
+       # add_attrs([("mcp.queue_overflow", True)]), log error, return {"ok": True} early
+       # (the response is dropped — the client never receives it)
+       else: record mcp.session_queue_depth attr + Custom/MCP/session_queue_depth metric
+
+8. return JsonResponse({"ok": True})
 ```
 
-The `JsonResponse({"ok": True})` is an ACK only. The real response travels back on the SSE stream.
+The `JsonResponse({"ok": True})` is an ACK only. The real response travels back on the SSE stream — `event_stream()` pulls `(timestamp, response_dict)` off the queue, computes queue-wait time from the timestamp, and serializes `response_dict` to the `event: message` payload.
 
 ---
 
 ## `mcp_app/clients/shared.py`
 
-### `build_base_url(base_template: str, credentials: dict) → str`
+### `build_base_url(template: str, credentials: dict) → str`
 
 ```python
-return base_template.format(publisher_id=credentials["publisherId"]).rstrip("/")
+publisher_id = credentials.get("publisherId", "")
+if not publisher_id:
+    raise Exception("No publisher ID in credentials — please re-authenticate")
+return template.format(publisher_id=publisher_id)
 ```
 
-`base_template` is `settings.CDS_BASE_URL` or `settings.CMS_BASE_URL` — both contain `{publisher_id}` placeholder.
+No `.rstrip("/")` — the templates (`settings.CDS_BASE_URL` / `settings.CMS_BASE_URL`) already end without a trailing slash; both contain a `{publisher_id}` placeholder. Raises if `publisherId` is missing from the credentials dict (defensive — should never happen post-auth).
 
 ### `build_basic_auth_headers(credentials: dict) → dict`
 
 ```python
 token = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
-return {"Authorization": f"Basic {token}"}
+return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 ```
+
+Returns **two** headers, not just `Authorization` — `Content-Type: application/json` is included for every request (CDS GETs ignore it; CMS POST/PATCH bodies need it).
 
 ### `slugify_url_path(path: str) → str`
 
-Normalises a URL path for use as a NR transaction name:
+Normalises a URL path for use as an NR transaction name segment:
 ```python
-re.sub(r"/\d+", "/{id}", path).strip("/").replace("/", "_") or "root"
+slug = path.strip("/").replace("/", "_")
+return slug or "root"
 ```
 
-e.g. `/post/42/comments/` → `post_{id}_comments`
+There is **no numeric-ID normalisation** (no `re.sub(r"/\d+", "/{id}", ...)`) — `/post/42/comments/` slugifies to `post_42_comments`, not `post_{id}_comments`. Each distinct numeric ID therefore produces its own NR transaction-name segment.
 
 ---
 
@@ -579,42 +660,46 @@ e.g. `/post/42/comments/` → `post_{id}_comments`
 **Retry algorithm:**
 
 ```
-_REQUEST_TIMEOUT = 5   # seconds
-_RETRY_BACKOFF   = 0.5 # seconds (waits before attempt 2)
+_REQUEST_TIMEOUT = 5   # seconds per attempt
+_RETRY_BACKOFF   = 1   # seconds (sleep before attempt 2 only)
 
 for attempt in range(2):
     if attempt > 0:
         time.sleep(_RETRY_BACKOFF)
     try:
-        resp = requests.get(url, headers=..., params=clean_params, timeout=5)
-        if resp.status_code == 408 and attempt == 0:
-            last_exc = exc; continue     # retry on explicit 408
+        resp = requests.get(url, headers={"Authorization": ...}, params=clean_params, timeout=5)
         if not resp.ok:
-            raise exc                    # non-retryable HTTP error
-        return resp.json()
-    except requests.exceptions.Timeout:
+            exc = Exception(f"{detail_or_message_or_HTTP_status} [url={url}]"); exc.response = resp
+            if resp.status_code == 408 and attempt == 0:
+                last_exc = exc; continue     # retry once on explicit 408
+            raise exc                        # any other non-2xx — non-retryable
+        # success: add_attrs(cds.endpoint/http_status/latency_ms/response_size_bytes/
+        #          retry_count/retried), record Custom/CDS/latency_ms + response_size_bytes
+        #          (+ retry_count metric if retried), return resp.json()
+    except requests.exceptions.Timeout as exc:
         last_exc = exc
-        if attempt == 0: continue        # retry on timeout
+        if attempt == 0: continue            # retry once on timeout
         break
-    except Exception:
-        last_exc = exc; break            # non-retryable — stop immediately
+    except Exception as exc:
+        last_exc = exc; break                # any other exception — stop immediately, no retry
 ```
 
-After both attempts fail: emits `MCPToolError`-related NR attrs, records `Custom/CDS/error_count`, raises `last_exc`.
+After both attempts fail: classifies the error, records `Custom/CDS/timeout_count` (if timeout) and/or `Custom/CDS/retry_count` (if retried), calls `notice_err()` with `error.layer/cds_endpoint/http_status/retry_count/category` attrs, records `Custom/CDS/error_count`, and **re-raises `last_exc`** (the caller — the tool handler — turns this into `MCPToolError`).
 
-**What triggers a retry:** `requests.Timeout` or `HTTP 408` on attempt 0 only.  
-**What does not retry:** Any other HTTP error (4xx, 5xx), network error other than timeout.
+**What triggers a retry:** `requests.Timeout` or `HTTP 408`, and only on attempt 0 (so at most one retry, after a 1-second sleep).
+**What does not retry:** Any other HTTP error (4xx, 5xx) or any other exception type.
+
+A separate helper `is_retryable_cds_error(exc)` exists (returns `True` for `Timeout` or an HTTP-408 response) but is **not called** by `cds_get` — the retry decision is inlined in the loop above. It is only re-exported through the `mcp_app/cds_client.py` backward-compat shim.
 
 ### Error classification: `classify_cds_error(exc, http_status) → str`
 
 | Condition | Category |
 |---|---|
-| Timeout or HTTP 408 | `"timeout"` |
-| HTTP 401 | `"auth_error"` |
-| HTTP 404 | `"not_found"` |
-| 400–499 | `"bad_request"` |
-| 500–599 | `"upstream_error"` |
-| Other | `"system_error"` |
+| `Timeout` exception or `http_status == 408` | `"timeout"` |
+| `http_status == 401` | `"auth_error"` |
+| `400 <= http_status < 500` (incl. 404 — there is no separate `"not_found"` category) | `"client_error"` |
+| `500 <= http_status < 600` | `"upstream_error"` |
+| Anything else (e.g. connection errors with no HTTP status) | `"system_error"` |
 
 ---
 
@@ -622,28 +707,41 @@ After both attempts fail: emits `MCPToolError`-related NR attrs, records `Custom
 
 ### `cms_get / cms_post / cms_patch / cms_delete(credentials, path, ...) → dict`
 
-No automatic retry (write operations are not idempotent). `_REQUEST_TIMEOUT = 10` seconds.
+No automatic retry (write operations are not idempotent — unlike `cds_get`'s single retry on timeout/408). `_REQUEST_TIMEOUT = 10` seconds for all four.
 
-All four functions share the same error path: `normalize_cms_error(exc, url)`.
+On a non-2xx response, all four record `cms.path/method/http_status/latency_ms`, `Custom/CMS/error_count`, and `error.category` (via `classify_cms_error`), then return `normalize_cms_error(exc, url)`. On success they record `_record_cms_attrs(...)`, `Custom/CMS/latency_ms`, and `Custom/CMS/response_size_bytes`. `requests.exceptions.Timeout` is handled by a shared helper `_record_cms_timeout_attrs(path, method)` that adds `cms.timed_out=True` and records both `Custom/CMS/timeout_count` and `Custom/CMS/error_count`, then returns the `error_type: "timeout"` dict directly (not via `normalize_cms_error`). `ConnectionError` is handled separately (see below). Each is wrapped in `@newrelic.agent.function_trace(name="cms_<verb>", group="CMS")`.
 
 ### `normalize_cms_error(exc, url) → dict`
 
-Returns a structured error dict (never raises):
+Returns a structured error dict (never raises) — used for non-2xx HTTP responses (NOT for `Timeout`/`ConnectionError`, which are handled by their own `except` clauses before `normalize_cms_error` is ever reached):
 
 ```
-HTTP 401 → {error_type:"auth_error", message:"CDS credentials rejected...", retryable:False}
+HTTP 401 → {error_type:"auth_error", message:"CMS credentials rejected (HTTP 401). Please re-authenticate: visit /connect or re-run the OAuth flow.", retryable:False}
 HTTP 404 → {error_type:"not_found", message:"Resource not found ({url}).", retryable:False}
-HTTP 4xx → {error_type:"bad_request", message: extracted from JSON detail/message/field errors, retryable:False}
-HTTP 5xx → {error_type:"upstream_error", message:"CMS server error HTTP {status}", retryable:True}
-Timeout  → {error_type:"timeout", message:"CMS request timed out", retryable:True}
-Other    → {error_type:"system_error", message:str(exc), retryable:False}
+HTTP 4xx → {error_type:"bad_request", message: <extracted, see below>, raw_api_response: <first 1000 chars of response body>, retryable:False}
+HTTP 5xx → {error_type:"upstream_error", message:"CMS server error (HTTP {status}). Try again shortly.", retryable:True}
+(via except requests.exceptions.Timeout, not normalize_cms_error) → {error_type:"timeout", message:"CMS request timed out.", retryable:True}
+Other / no http_status → {error_type:"system_error", message:str(exc), retryable:False}
 ```
 
-4xx message extraction priority: `detail` → `message` → `error.description` → field-error list → `f"HTTP {status}"`.
+4xx message extraction priority: `detail` → `message` → `error.description` → (only if still unset) a field-error list built from any list/string-valued top-level keys, joined as `"Validation error — key: val; ..."` → falls back to `f"HTTP {status}"`. The raw response body (first 1000 chars) is always attached as `raw_api_response` for debugging, even when a friendlier message was extracted.
 
 ### `classify_cms_error(exc, http_status) → str`
 
-Same table as CDS classification (above).
+**Differs from `classify_cds_error`** — CMS has its own dedicated `"not_found"` and `"bad_request"` categories that CDS's classifier doesn't:
+
+| Condition | Category |
+|---|---|
+| `Timeout` exception or `http_status == 408` | `"timeout"` |
+| `http_status == 401` | `"auth_error"` |
+| `http_status == 404` | `"not_found"` |
+| `400 <= http_status < 500` (excluding 404) | `"bad_request"` |
+| `500 <= http_status < 600` | `"upstream_error"` |
+| Anything else | `"system_error"` |
+
+Note that `cms_get/post/patch/delete` call `classify_cms_error()` only to populate the `error.category` *attribute* on non-2xx responses — the actual error dict returned to the caller is built by `normalize_cms_error()`, which re-derives status-based branching independently (and happens to produce the same `error_type` strings for 401/404/4xx/5xx, but routes `Timeout` through a separate `except` clause rather than through `classify_cms_error`).
+
+All four functions also have an `except requests.exceptions.ConnectionError` clause that **bypasses `normalize_cms_error` entirely**, returning `{"error_type": "system_error", "message": "Could not connect to CMS API.", "retryable": True}` — note `retryable: True` here, which differs from the generic/`"Other"` fallback inside `normalize_cms_error` (`retryable: False`). Any other unexpected exception is reported via `notice_err()` and **re-raised** (not normalized) — the tool-call layer turns that into `MCPToolError`.
 
 ---
 
@@ -651,23 +749,19 @@ Same table as CDS classification (above).
 
 ### Tool registration
 
-Each CDS submodule (`posts.py`, `categories.py`, …) exports:
+Each CDS submodule (`authors.py`, `categories.py`, `content.py`, `posts.py`, `publisher.py`, `sitemaps.py`, `static_files.py`, `tags.py`) exports:
 ```python
 SCHEMAS: list[dict]       # list of MCP tool schema dicts
 HANDLERS: dict[str, callable]  # tool_name → handler function
 ```
 
-`__init__.py` aggregates at import time:
+`__init__.py` aggregates at import time via explicit aliased imports (`from .posts import HANDLERS as _POSTS_HANDLERS`, etc. — not a loop or wildcard):
 ```python
-from mcp_app.cds import posts, categories, ...
+TOOLS: list[dict] = _POSTS_SCHEMAS + _CATEGORIES_SCHEMAS + _TAGS_SCHEMAS + _AUTHORS_SCHEMAS \
+    + _PUBLISHER_SCHEMAS + _CONTENT_SCHEMAS + _SITEMAPS_SCHEMAS + _STATIC_SCHEMAS
 
-TOOLS: list[dict] = posts.SCHEMAS + categories.SCHEMAS + ...
-
-_HANDLER_REGISTRY: dict[str, callable] = {
-    **posts.HANDLERS,
-    **categories.HANDLERS,
-    ...
-}
+_HANDLER_REGISTRY: dict = {**_POSTS_HANDLERS, **_CATEGORIES_HANDLERS, **_TAGS_HANDLERS,
+    **_AUTHORS_HANDLERS, **_PUBLISHER_HANDLERS, **_CONTENT_HANDLERS, **_SITEMAPS_HANDLERS, **_STATIC_HANDLERS}
 ```
 
 ### Per-tool concurrency tracking
@@ -677,53 +771,70 @@ _active_calls: dict[str, int] = collections.defaultdict(int)  # tool_name → co
 _active_calls_lock: threading.Lock = ...
 ```
 
-On each `dispatch_cds_tool` call:
-```python
-with _active_calls_lock:
-    _active_calls[name] += 1
-    concurrent = _active_calls[name]
+`dispatch_cds_tool(credentials, name, args)` — **note the parameter order: `credentials` first, then `name`** (the doc previously had this backwards):
 
-try:
-    result = _HANDLER_REGISTRY[name](credentials, args)
-finally:
+```python
+@newrelic.agent.function_trace(name="dispatch_cds_tool", group="Tool")
+def dispatch_cds_tool(credentials, name, args):
+    add_attrs([("mcp.tool_name", name)])
     with _active_calls_lock:
-        _active_calls[name] -= 1
+        _active_calls[name] += 1
+        concurrency = _active_calls[name]
+    add_attrs([("mcp.tool_concurrency", concurrency)])
+    record_custom_metric(f"Custom/Tool/{name}/active_calls", concurrency)
+    try:
+        handler = _HANDLER_REGISTRY.get(name)
+        if handler is None:
+            raise Exception(f"Unknown tool: {name}")     # NOT a returned error dict — see below
+        with fn_trace(name, group="Tool"):
+            return handler(credentials, args)
+    except Exception as exc:
+        http_status = getattr(getattr(exc, "response", None), "status_code", None)
+        if http_status == 401:
+            # Graceful degradation: CDS rejected the forwarded credentials mid-call
+            return {"error": "auth_expired",
+                    "message": "Your CDS credentials were rejected (HTTP 401). "
+                               "Please re-authenticate: visit /connect or re-run the OAuth flow."}
+        notice_err(exc, [("error.layer", "tool"), ("error.tool_name", name)])
+        raise                                             # everything else propagates → MCPToolError
+    finally:
+        with _active_calls_lock:
+            _active_calls[name] = max(0, _active_calls[name] - 1)
 ```
 
-`concurrent` is attached as a NR span attribute (`cds.concurrent_calls`). No limit is enforced — it is an observability metric, not a throttle.
+`concurrency` is attached as a transaction attribute (`mcp.tool_concurrency` via `add_attrs()`) and as the custom metric `Custom/Tool/<name>/active_calls`. No limit is enforced — it is an observability gauge, not a throttle.
 
-### `dispatch_cds_tool(name, credentials, args) → dict`
+**Two distinct error paths, not one:**
+- **Unknown tool name** → raises a bare `Exception("Unknown tool: ...")`, which has no `.response` attribute, so `http_status` is `None`, the 401 branch is skipped, and the exception is re-raised → surfaces to the client as `MCPToolError` (`isError: true`), **not** a graceful `{"error_type": "not_found", ...}` degraded response.
+- **CDS returned 401 mid-call** (credentials revoked/expired after auth) → caught and converted to a *degraded* result `{"error": "auth_expired", "message": "..."}`, which `_handle_tool_call` reports as `MCPToolDegraded` rather than a hard error.
 
-```python
-if name not in _HANDLER_REGISTRY:
-    return {"error_type": "not_found", "message": f"Unknown tool: {name}"}
-```
-
-Calls the handler and returns its result. The handler signature is:
-```python
-def handler(credentials: dict, args: dict) -> dict
-```
+Each handler call is wrapped in `fn_trace(name, group="Tool")` (a guarded `FunctionTrace` span). Handler signature: `def handler(credentials: dict, args: dict) -> dict`.
 
 ---
 
 ## `mcp_app/cms/__init__.py`
 
-Identical pattern to CDS with two additions:
+Same aggregation/concurrency-tracking shape as CDS (8 submodules: `categories`, `custom_components`, `custom_content_types`, `live_blog`, `media`, `posts`, `tags`, `validators`; `CMS_TOOLS` and `_HANDLER_REGISTRY` built the same way), **plus one addition**:
 
 ```python
-CMS_TOOL_NAMES: frozenset = frozenset(tool["name"] for tool in CMS_TOOLS)
+CMS_TOOL_NAMES: frozenset = frozenset(_HANDLER_REGISTRY.keys())
 ```
 
 Used in `dispatch.py` to route to CMS vs CDS without a linear scan.
 
+**The exception handling in `dispatch_cms_tool` is simpler than CDS's — there is no 401-to-`auth_expired` special case.** Its `except Exception` block unconditionally calls `notice_err(exc, [("error.layer", "cms_tool"), ...])` and re-raises everything, including unknown-tool errors and CMS 401s — all surface as `MCPToolError`, not `MCPToolDegraded`. (CMS write tools route their upstream HTTP errors through `normalize_cms_error` *inside* the handler/`cms_client` layer before they ever reach `dispatch_cms_tool`, which is presumably why this dispatcher doesn't need its own 401 carve-out — but it does mean an unknown CMS tool name behaves differently from an unknown CDS tool name only in the `error.layer` attribute value, not in the client-visible result.)
+
 ### CMS write-op detection
 
-In `dispatch.py`, a tool call is a "write op" if:
+`dispatch.py`'s `_is_cms_write(name)` (backed by `_CMS_READ_PREFIXES = ("list_", "get_", "validate_")`) treats a call as a "write op" if:
 ```python
-name in CMS_TOOL_NAMES and not name.startswith(("list_", "get_", "validate_"))
+name in CMS_TOOL_NAMES and not any(name.startswith(p) for p in ("list_", "get_", "validate_"))
 ```
 
-These are counted against the 50-write-per-session cap in `session_stats["write_op_count"]`.
+`_cms_write_bucket(name)` then splits these into two independent 100-op-per-session
+caps: `update_*`/`delete_*` calls count against `session_stats["update_delete_op_count"]`,
+everything else (`create_*`, `register_*`, `add_*`, `submit_*`) counts against
+`session_stats["create_op_count"]`.
 
 ---
 
@@ -984,7 +1095,7 @@ No `IF EXISTS` — SQLite doesn't support it. Introspect first, then drop only i
 publive_mcp/settings/
   base.py      — loaded by all environments
   prod.py      — import base.*, override for production
-  dev.py       — import base.*, override for local dev
+  local.py     — import base.*, override for local dev
 ```
 
 ### Key settings in `base.py`
@@ -999,8 +1110,9 @@ DATABASES = {"default": dj_database_url.parse(os.environ.get("DATABASE_URL", "sq
     conn_max_age=600)}   # connection pooling — reuse per-thread for up to 10 minutes
 
 # Sessions (DB-backed for persistence across deploys)
-SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
-SESSION_COOKIE_AGE = 60 * 60 * 24 * 90    # 90 days default TTL
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_AGE = 10 * 365 * 24 * 3600   # 10-year ceiling; sessions otherwise live
+                                            # until /auth/logout (session_ttl_seconds = -1)
 
 # Security
 BASE_URL        = os.environ.get("BASE_URL", "http://localhost:8000")
@@ -1022,14 +1134,17 @@ OAUTH_ALLOWED_REDIRECT_URIS = ["https://claude.ai/...", "cursor://...", ...]
 ## `publive_mcp/wsgi.py`
 
 ```python
+import os
+
 from django.core.wsgi import get_wsgi_application
 import newrelic.agent
 
-newrelic.agent.initialize("newrelic.ini")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "publive_mcp.settings")
+
 application = newrelic.agent.WSGIApplicationWrapper(get_wsgi_application())
 ```
 
-The WSGI wrapper instruments every request **before** Django's middleware stack, giving accurate wall-clock timings that include middleware overhead. Gunicorn is pointed at `publive_mcp.wsgi:application`.
+Note there's no `newrelic.agent.initialize()` call anywhere in the codebase, and `entrypoint.sh` execs `gunicorn publive_mcp.wsgi` directly — not via the `newrelic-admin run-program` wrapper that the agent's own docs recommend for auto-initialization. The only New Relic touchpoint at process start is the `import newrelic.agent` + `WSGIApplicationWrapper(...)` here. Whether the agent is actually harvesting and reporting data in production therefore hinges on something outside this repo (e.g. an env var or platform-level wrapper not visible in source) — worth confirming directly against the live New Relic dashboard rather than assuming from this file alone. The WSGI wrapper instruments every request **before** Django's middleware stack, giving accurate wall-clock timings that include middleware overhead. Gunicorn (`entrypoint.sh`) is pointed at `publive_mcp.wsgi`.
 
 ---
 
@@ -1039,11 +1154,16 @@ All New Relic calls go through these wrappers. Each checks `if _nr is None` or `
 
 | Helper | What it wraps |
 |---|---|
-| `add_attrs(pairs)` | `newrelic.agent.add_custom_attributes()` |
-| `record_event(type, attrs)` | `newrelic.agent.record_custom_event()` |
-| `record_metric(name, val)` | `newrelic.agent.record_custom_metric()` |
-| `notice_err(exc, pairs)` | `newrelic.agent.notice_error()` |
 | `set_txn_name(name, group)` | `newrelic.agent.set_transaction_name()` |
+| `add_attrs(pairs)` | `newrelic.agent.add_custom_attribute()` (looped per pair) |
+| `add_span_attrs(pairs)` | `newrelic.agent.add_custom_span_attribute()` — attaches to the current span (trace waterfall) rather than the transaction |
+| `notice_err(exc, attrs)` | `newrelic.agent.notice_error(exc, attributes=...)` — attrs land on the error event itself (`FROM TransactionError`), not just the transaction |
+| `record_event(type, params)` | `newrelic.agent.record_custom_event()` — does not require an active transaction, only `_nr is not None` |
+| `record_metric(name, val)` | `newrelic.agent.record_custom_metric()` |
+| `get_linking_metadata()` | `newrelic.agent.get_linking_metadata()` — returns `{}` outside a transaction (e.g. from `event_stream()`); keys include `trace.id`, `span.id`, `entity.guid` |
+| `suppress_apdex()` | `newrelic.agent.suppress_apdex_metric()` |
+| `suppress_trace()` | `newrelic.agent.suppress_transaction_trace()` |
+| `fn_trace(name, group)` | Context manager wrapping `newrelic.agent.FunctionTrace` — no-ops (yields plainly) outside a transaction |
 | `suppress_apdex()` | `newrelic.agent.suppress_apdex_metric()` |
 | `suppress_trace()` | `newrelic.agent.suppress_transaction_trace()` |
 | `get_linking_metadata()` | `newrelic.agent.get_linking_metadata()` → `{}` fallback |

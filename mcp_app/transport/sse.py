@@ -93,7 +93,8 @@ def open_sse_connection(request, credentials: dict, token_expires_at):
             "client_name":                   None,
             "session_trace_id":              session_trace_id,
             "tool_sequence":                 [],
-            "write_op_count":                0,
+            "create_op_count":               0,
+            "update_delete_op_count":        0,
         }
 
     newrelic.agent.record_custom_metric("Custom/MCP/active_sessions", active_on_open)

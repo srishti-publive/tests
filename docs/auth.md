@@ -43,15 +43,53 @@ Browser → session cookie         → resolved on every MCP tool call
 
 **Why a separate browser flow:** The OAuth redirect round-trip is invisible inside a browser tab. `/connect` gives a direct login page for human users who want to use the MCP server via a browser without going through an AI client.
 
-**Session TTL options** (set at login via `remember_for_days`):
+**Session lifetime:** Sessions never self-expire. `auth_login()` always sets `session_ttl_seconds = -1` ("never expires — only `/auth/logout` ends the session") and calls `request.session.set_expiry(10 * 365 * 24 * 3600)` — a 10-year cookie ceiling so Django keeps the session alive indefinitely. There is no per-login configurable TTL (`remember_for_days` does not exist in the code); the only way to end a session is an explicit `POST /auth/logout`.
 
-| `remember_for_days` | Behaviour |
-|---|---|
-| `-1` | Browser session only — expires when tab closes |
-| `0` | Django controls expiry (`SESSION_COOKIE_AGE = 90d`) |
-| `N` | Absolute deadline: `login_time + N*86400s`, enforced server-side |
+`check_session_ttl()` re-reads `session_created_at` / `session_ttl_seconds` on every request and returns `True` (expired) only when `session_ttl_seconds > 0` and the absolute deadline has passed — which never happens with the `-1` value the login flow always writes. It exists to enforce a server-side absolute deadline for any session that *did* get a positive TTL (e.g. legacy rows from before this change), catching cases Django's cookie TTL would miss (e.g. if `SESSION_SAVE_EVERY_REQUEST` is off).
 
-Server-side TTL check (`check_session_ttl`) re-reads `session_created_at` on every request. This catches sessions Django's cookie TTL would miss (e.g. if `SESSION_SAVE_EVERY_REQUEST` is off).
+---
+
+## Data lifecycle: where it comes from, where it lands
+
+### OAuth 2.0 + PKCE (Claude Desktop, Cursor, etc.)
+
+1. **`POST /register`** — client sends `redirect_uri`. Server mints `client_id = secrets.token_urlsafe(24)`.
+   → **Written to `oauth_client`**: `client_id`, `redirect_uri`, `created_at` — plaintext (not secrets, permanent row).
+
+2. **`GET /authorize`** — client redirects the user's browser here with `client_id`, `redirect_uri`, `code_challenge`, `state`. Nothing is persisted; the server just renders `authorize.html`, echoing these values back as hidden form fields.
+
+3. **`POST /authorize`** — the user types `publisherId` / `apiKey` / `apiSecret` into that form.
+   - These are validated **live against the CDS API** (`validate_cds_credentials`) first — nothing is written if validation fails.
+   - On success the server mints a single-use `code = secrets.token_urlsafe(32)`.
+   → **Written to `oauth_code`**: `code`, `client_id`, `redirect_uri`, `code_challenge`, `expires_at = now + 10 min`, and `credentials = {publisherId, apiKey, apiSecret}` — passed through `EncryptedJSONField` (Fernet, see `auth_app/crypto.py`) so it lands on disk **already encrypted**.
+   - The browser is redirected back to the client's `redirect_uri` with only the opaque `?code=...&state=...` — the credentials themselves never travel over this hop.
+
+4. **`POST /token`** (`grant_type=authorization_code`) — client exchanges `code` + `code_verifier`.
+   - Server fetches the `oauth_code` row by `code` (the `EncryptedJSONField` transparently decrypts `credentials` on read), checks `expires_at`, verifies `code_challenge` against the PKCE `code_verifier`, checks `redirect_uri`.
+   - On success the row is **deleted immediately** (`auth_code.delete()`) — single-use, which is also why the `oauth_code` table is normally empty.
+   - Server mints `token` + `refresh_token` (or reuses an existing one — see the upsert pattern keyed on `client_id + publisher_id`).
+   → **Written to `oauth_token`**: `token`, `client_id`, `publisher_id` (denormalised plaintext column for fast lookup without decrypting every row), `refresh_token`, `created_at`, and `credentials` — re-encrypted into this row via the same `EncryptedJSONField`. There is **no `expires_at`** column here; the row is permanent until revoked or upserted.
+   - Response to the client is `{access_token, token_type, refresh_token}` — the encrypted blob never leaves the server.
+
+5. **`Authorization: Bearer <token>`** on every MCP tool call — `resolve_credentials()` (`mcp_app/protocol/auth.py`) looks up `oauth_token` by `token`, the field decrypts `credentials` to `{publisherId, apiKey, apiSecret}` in memory, and that dict is handed to the tool handler, which forwards it as Basic Auth to the Publive CDS/CMS APIs. Nothing is written back to the DB on a normal call.
+
+6. **`POST /token`** (`grant_type=refresh_token`) — rotates `refresh_token` on the existing `oauth_token` row inside an atomic transaction (`select_for_update`); `token`/`credentials` are untouched.
+
+7. **`POST /revoke`** (or client disconnect) — deletes the matching `oauth_token` row by `token` or `refresh_token` (RFC 7009; always returns 200 regardless of whether a row matched).
+
+### Session auth (browser users via `/connect`)
+
+1. **`GET /connect`** — renders `connect.html`. Nothing persisted.
+
+2. **`POST /auth/login`** — browser submits `publisherId` / `apiKey` / `apiSecret` (+ `remember_for_days`).
+   - Validated live against the CDS API, exactly like step 3 above — nothing persisted on failure.
+   - On success, `set_session_credentials()` runs `{publisherId, apiKey, apiSecret}` through `encrypt_json()` (the same Fernet routine `EncryptedJSONField` uses) and stores the resulting **encrypted string** — not the plain dict — under `request.session["credentials"]`, alongside `session_created_at`, `session_ttl_seconds`, `authenticatedAt`.
+   → Django's DB session backend (`SESSION_ENGINE = django.contrib.sessions.backends.db`) serialises that whole dict and **writes it to `django_session`**: `session_key` (PK), `session_data` (`base64(pickle({...}))`, where the `credentials` entry inside is *already* the Fernet-encrypted string — so it's encrypted twice over: once by us, once by Django's session machinery), `expire_date`.
+   - The browser only ever receives a `sessionid` cookie pointing at that row — credentials never reach the cookie.
+
+3. **Session cookie** on every later request (browser page or MCP call without a `Bearer` header) — `resolve_credentials()` reads `request.session["credentials"]`, calls `decrypt_json()` to get the plaintext dict back, checks `check_session_ttl()`, and hands the dict to the tool handler for that single request only. It is never written back to the DB in plaintext.
+
+4. **`POST /auth/logout`** — flushes the session, deleting the `django_session` row outright.
 
 ---
 
