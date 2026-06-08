@@ -17,8 +17,12 @@ from .live_blog import HANDLERS as _LB_H
 from .live_blog import SCHEMAS as _LB_S
 from .media import HANDLERS as _MEDIA_H
 from .media import SCHEMAS as _MEDIA_S
+from .newsletter import HANDLERS as _NEWS_H
+from .newsletter import SCHEMAS as _NEWS_S
 from .posts import HANDLERS as _POSTS_H
 from .posts import SCHEMAS as _POSTS_S
+from .reader import HANDLERS as _READER_H
+from .reader import SCHEMAS as _READER_S
 from .tags import HANDLERS as _TAGS_H
 from .tags import SCHEMAS as _TAGS_S
 from .validators import HANDLERS as _VAL_H
@@ -29,11 +33,13 @@ logger = logging.getLogger(__name__)
 CMS_TOOLS: list[dict] = (
     _CAT_S + _TAGS_S + _POSTS_S + _LB_S
     + _CC_S + _CCT_S + _VAL_S + _MEDIA_S
+    + _NEWS_S + _READER_S
 )
 
 _HANDLER_REGISTRY: dict = {
     **_CAT_H, **_TAGS_H, **_POSTS_H, **_LB_H,
     **_CC_H,  **_CCT_H,  **_VAL_H,   **_MEDIA_H,
+    **_NEWS_H, **_READER_H,
 }
 
 # Public set used by the dispatcher to route tool calls without brittle prefix checks.
