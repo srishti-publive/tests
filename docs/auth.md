@@ -20,9 +20,9 @@ Client → Bearer <token>          → resolved on every MCP tool call
 **Why dynamic registration (`/register`):** Claude Desktop generates a new client_id per install. Requiring pre-registration would block every new user.
 
 **Token model:**
-- `OAuthToken` stores `{publisherId, apiKey, apiSecret}` encrypted at rest.
+- `OAuthToken` stores `{publisherId, apiKey, apiSecret}` as plain JSON.
 - Tokens have **no expiry** — the user's Publive credentials are the authority. Revoke via `/revoke`.
-- `publisher_id` is denormalised as a plain indexed column so MCP dispatch can look up tokens by `(client_id, publisher_id)` without decrypting every row.
+- `publisher_id` is denormalised as a plain indexed column so MCP dispatch can look up tokens by `(client_id, publisher_id)` directly.
 - Upsert pattern: same `client_id + publisher_id` always returns the same token. Re-authorising doesn't break in-flight sessions.
 - `refresh_token` rotates on every use (atomic DB transaction). Stolen refresh tokens become single-use.
 
@@ -37,7 +37,7 @@ Client → Bearer <token>          → resolved on every MCP tool call
 **Flow:**
 ```
 Browser → GET  /connect          → renders login form
-Browser → POST /auth/login       → validates CDS creds, stores encrypted creds in Django session
+Browser → POST /auth/login       → validates CDS creds, stores creds in Django session
 Browser → session cookie         → resolved on every MCP tool call
 ```
 
@@ -61,17 +61,17 @@ Browser → session cookie         → resolved on every MCP tool call
 3. **`POST /authorize`** — the user types `publisherId` / `apiKey` / `apiSecret` into that form.
    - These are validated **live against the CDS API** (`validate_cds_credentials`) first — nothing is written if validation fails.
    - On success the server mints a single-use `code = secrets.token_urlsafe(32)`.
-   → **Written to `oauth_code`**: `code`, `client_id`, `redirect_uri`, `code_challenge`, `expires_at = now + 10 min`, and `credentials = {publisherId, apiKey, apiSecret}` — passed through `EncryptedJSONField` (Fernet, see `auth_app/crypto.py`) so it lands on disk **already encrypted**.
+   → **Written to `oauth_code`**: `code`, `client_id`, `redirect_uri`, `code_challenge`, `expires_at = now + 10 min`, and `credentials = {publisherId, apiKey, apiSecret}` stored as plain JSON.
    - The browser is redirected back to the client's `redirect_uri` with only the opaque `?code=...&state=...` — the credentials themselves never travel over this hop.
 
 4. **`POST /token`** (`grant_type=authorization_code`) — client exchanges `code` + `code_verifier`.
-   - Server fetches the `oauth_code` row by `code` (the `EncryptedJSONField` transparently decrypts `credentials` on read), checks `expires_at`, verifies `code_challenge` against the PKCE `code_verifier`, checks `redirect_uri`.
+   - Server fetches the `oauth_code` row by `code`, checks `expires_at`, verifies `code_challenge` against the PKCE `code_verifier`, checks `redirect_uri`.
    - On success the row is **deleted immediately** (`auth_code.delete()`) — single-use, which is also why the `oauth_code` table is normally empty.
    - Server mints `token` + `refresh_token` (or reuses an existing one — see the upsert pattern keyed on `client_id + publisher_id`).
-   → **Written to `oauth_token`**: `token`, `client_id`, `publisher_id` (denormalised plaintext column for fast lookup without decrypting every row), `refresh_token`, `created_at`, and `credentials` — re-encrypted into this row via the same `EncryptedJSONField`. There is **no `expires_at`** column here; the row is permanent until revoked or upserted.
-   - Response to the client is `{access_token, token_type, refresh_token}` — the encrypted blob never leaves the server.
+   → **Written to `oauth_token`**: `token`, `client_id`, `publisher_id` (denormalised indexed column for fast lookup), `refresh_token`, `created_at`, and `credentials` (plain JSON, copied from the auth code row). There is **no `expires_at`** column here; the row is permanent until revoked or upserted.
+   - Response to the client is `{access_token, token_type, refresh_token}` — the stored credentials never leave the server.
 
-5. **`Authorization: Bearer <token>`** on every MCP tool call — `resolve_credentials()` (`mcp_app/protocol/auth.py`) looks up `oauth_token` by `token`, the field decrypts `credentials` to `{publisherId, apiKey, apiSecret}` in memory, and that dict is handed to the tool handler, which forwards it as Basic Auth to the Publive CDS/CMS APIs. Nothing is written back to the DB on a normal call.
+5. **`Authorization: Bearer <token>`** on every MCP tool call — `resolve_credentials()` (`mcp_app/protocol/auth.py`) looks up `oauth_token` by `token`, reads `credentials` as `{publisherId, apiKey, apiSecret}`, and hands that dict to the tool handler, which forwards it as Basic Auth to the Publive CDS/CMS APIs. Nothing is written back to the DB on a normal call.
 
 6. **`POST /token`** (`grant_type=refresh_token`) — rotates `refresh_token` on the existing `oauth_token` row inside an atomic transaction (`select_for_update`); `token`/`credentials` are untouched.
 
@@ -83,11 +83,11 @@ Browser → session cookie         → resolved on every MCP tool call
 
 2. **`POST /auth/login`** — browser submits `publisherId` / `apiKey` / `apiSecret` (+ `remember_for_days`).
    - Validated live against the CDS API, exactly like step 3 above — nothing persisted on failure.
-   - On success, `set_session_credentials()` runs `{publisherId, apiKey, apiSecret}` through `encrypt_json()` (the same Fernet routine `EncryptedJSONField` uses) and stores the resulting **encrypted string** — not the plain dict — under `request.session["credentials"]`, alongside `session_created_at`, `session_ttl_seconds`, `authenticatedAt`.
-   → Django's DB session backend (`SESSION_ENGINE = django.contrib.sessions.backends.db`) serialises that whole dict and **writes it to `django_session`**: `session_key` (PK), `session_data` (`base64(pickle({...}))`, where the `credentials` entry inside is *already* the Fernet-encrypted string — so it's encrypted twice over: once by us, once by Django's session machinery), `expire_date`.
+   - On success, `set_session_credentials()` stores `{publisherId, apiKey, apiSecret}` as a plain dict under `request.session["credentials"]`, alongside `session_created_at`, `session_ttl_seconds`, `authenticatedAt`.
+   → Django's DB session backend (`SESSION_ENGINE = django.contrib.sessions.backends.db`) serialises that whole dict and **writes it to `django_session`**: `session_key` (PK), `session_data` (`base64(pickle({...}))`), `expire_date`.
    - The browser only ever receives a `sessionid` cookie pointing at that row — credentials never reach the cookie.
 
-3. **Session cookie** on every later request (browser page or MCP call without a `Bearer` header) — `resolve_credentials()` reads `request.session["credentials"]`, calls `decrypt_json()` to get the plaintext dict back, checks `check_session_ttl()`, and hands the dict to the tool handler for that single request only. It is never written back to the DB in plaintext.
+3. **Session cookie** on every later request (browser page or MCP call without a `Bearer` header) — `resolve_credentials()` reads `request.session["credentials"]`, checks `check_session_ttl()`, and hands the dict to the tool handler for that single request only.
 
 4. **`POST /auth/logout`** — flushes the session, deleting the `django_session` row outright.
 
@@ -100,23 +100,6 @@ Browser → session cookie         → resolved on every MCP tool call
 2. Django session cookie → decrypt session credentials.
 
 Neither path re-validates against the CDS API on each call — that would add ~500 ms per tool call. Credentials are validated once at login/authorize time.
-
----
-
-## Credential encryption at rest
-
-`{publisherId, apiKey, apiSecret}` is never stored as plaintext. It goes through `EncryptedJSONField` → `auth_app/crypto.py` → Fernet symmetric encryption on every DB write.
-
-**Key:** `CREDENTIALS_ENCRYPTION_KEY` env var (32-byte URL-safe base64 Fernet key).
-
-**Why Fernet over hashing:** Credentials must be recoverable (forwarded to CDS/CMS on every tool call). Hashing is one-way and cannot be used here.
-
-**What happens without the key:** A random ephemeral key is generated at startup. Encryption works, but all tokens become unreadable after a restart — users must re-authenticate. Set `CREDENTIALS_ENCRYPTION_KEY` in production.
-
-Generate a key:
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
 
 ---
 
@@ -134,8 +117,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 |---|---|
 | `oauth_client` | Registered OAuth clients (one per AI client install) |
 | `oauth_code` | Short-lived PKCE auth codes (10 min, deleted on use) |
-| `oauth_token` | Long-lived bearer tokens with encrypted credentials |
-| `django_session` | Browser sessions with encrypted credentials |
+| `oauth_token` | Long-lived bearer tokens with credentials (plain JSON) |
+| `django_session` | Browser sessions with credentials (plain JSON) |
 
 ---
 
@@ -167,7 +150,6 @@ Fails open — a cache outage never blocks traffic.
 |---|---|---|
 | `DJANGO_SECRET_KEY` | Yes | Django cryptographic signing |
 | `DATABASE_URL` | Yes (prod) | Postgres connection string; falls back to SQLite |
-| `CREDENTIALS_ENCRYPTION_KEY` | Yes (prod) | Fernet key for encrypting stored credentials |
 | `BASE_URL` | Yes (prod) | Used in OAuth metadata discovery endpoints |
 | `CDS_BASE_URL` | No | CDS host template (default: `https://cds-beta.thepublive.com/publisher/{publisher_id}`) |
 | `CMS_BASE_URL` | No | CMS host template (default: `https://cms-beta.thepublive.com/publisher/{publisher_id}`) |

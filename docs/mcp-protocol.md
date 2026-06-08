@@ -61,7 +61,7 @@ Client                          Server
 **Open (`GET /mcp`):**
 1. Auth resolved (Bearer or session cookie).
 2. UUID session ID generated.
-3. Session registered in Redis via `register_session()` (`mcp_app/transport/redis_session_store.py`) — encrypted credentials + a capped message queue (`mcp:session_queue:{id}`, see `redis_message_queue.py`), both keyed by session ID and shared across every worker/replica.
+3. Session registered in Redis via `register_session()` (`mcp_app/transport/redis_session_store.py`) — credentials (plain JSON) + a capped message queue (`mcp:session_queue:{id}`, see `redis_message_queue.py`), both keyed by session ID and shared across every worker/replica.
 4. Session stats hash initialised in Redis via `init_stats()` (`mcp_app/protocol/redis_session_stats.py`) — tool count, timings, token estimates.
 5. First SSE event sent: `event: endpoint` with the `POST /mcp/message` URL including the session ID. The client reads this URL and uses it for all subsequent messages.
 6. `StreamingHttpResponse` holds the connection open; a gunicorn thread blocks on `pop_message()` (Redis `BLPOP`) for the session lifetime.
@@ -144,7 +144,7 @@ The 401 response always includes:
 
 MCP clients read `WWW-Authenticate` to start the OAuth flow automatically. `authUrl` is for human browser users.
 
-Credentials are **not re-validated** against the CDS API on each request — that would add ~500ms per tool call. They are validated once at login/authorize and stored encrypted in the DB or session.
+Credentials are **not re-validated** against the CDS API on each request — that would add ~500ms per tool call. They are validated once at login/authorize and stored in the DB or session.
 
 ---
 

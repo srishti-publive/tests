@@ -1,6 +1,6 @@
 # Responsibility: Pure business-logic helpers for OAuth auth flows — origin validation,
 # redirect-URI allowlisting, CDS credential verification, session TTL checks,
-# and session credential encryption/decryption.
+# and session credential storage.
 
 import base64
 import json
@@ -20,31 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_session_credentials(session) -> Optional[dict]:
-    """Decrypt and return the credentials dict stored in the session.
-
-    Handles both the legacy format (plain dict, stored before Fix D was deployed)
-    and the new format (Fernet-encrypted string). Returns None if absent or corrupted.
-    """
+    """Return the credentials dict stored in the session, or None if absent."""
     raw = session.get("credentials")
-    if raw is None:
-        return None
     if isinstance(raw, dict):
-        # Legacy session — plaintext dict written before encryption was enabled
         return raw
-    if isinstance(raw, str):
-        try:
-            from .crypto import InvalidToken, decrypt_json
-            return decrypt_json(raw)
-        except (InvalidToken, json.JSONDecodeError):
-            logger.warning("get_session_credentials: failed to decrypt session credentials — treating as expired")
-            return None
     return None
 
 
 def set_session_credentials(session, credentials: dict) -> None:
-    """Encrypt and store credentials in the session."""
-    from .crypto import encrypt_json
-    session["credentials"] = encrypt_json(credentials)
+    """Store credentials in the session."""
+    session["credentials"] = credentials
 
 
 def check_session_ttl(session) -> bool:

@@ -54,16 +54,14 @@ Handles both entry paths for users:
 - Revocation (`POST /revoke`).
 
 **Session auth** (browser users):
-- Login form at `/connect` → `POST /auth/login` → credentials stored encrypted in Django session.
+- Login form at `/connect` → `POST /auth/login` → credentials stored in Django session.
 - Server-side absolute TTL enforced on every request — independent of the cookie expiry.
 
 Both paths validate credentials against `CDS /posts/?limit=1` before issuing a token or session.
 
 **Key components:**
-- `models.py` — `OAuthClient`, `OAuthCode`, `OAuthToken` (all with `EncryptedJSONField` for credentials).
-- `crypto.py` — Fernet symmetric encryption. Key from `CREDENTIALS_ENCRYPTION_KEY` env var.
+- `models.py` — `OAuthClient`, `OAuthCode`, `OAuthToken` (`credentials` is a plain `JSONField`).
 - `services.py` — `validate_cds_credentials()`, `get/set_session_credentials()`, `check_session_ttl()`.
-- `fields.py` — `EncryptedJSONField`: transparent encrypt/decrypt on DB read/write.
 
 ---
 
@@ -121,7 +119,7 @@ The core of the server. Layered into four sub-concerns:
 6. User submits credentials
 7. POST /authorize
    → validate against CDS /posts/?limit=1
-   → OAuthCode created (encrypted credentials, 10-min TTL)
+   → OAuthCode created (credentials as JSON, 10-min TTL)
    → redirect to redirect_uri?code=...&state=...
 8. Client → POST /token (code + PKCE verifier)
    → PKCE SHA-256 check
@@ -216,7 +214,7 @@ Write tools follow a tiered safety model. See `docs/tools.md` for full detail.
 │ redirect_uri    │       │ client_id        │       │ client_id        │
 │ created_at      │       │ redirect_uri     │       │ publisher_id ◄── index
 └─────────────────┘       │ code_challenge   │       │ refresh_token    │
-                          │ credentials ◄── Fernet   │ credentials ◄── Fernet
+                          │ credentials (JSON)│      │ credentials (JSON)│
                           │ expires_at       │       │ created_at       │
                           └──────────────────┘       └──────────────────┘
 
@@ -224,7 +222,7 @@ Write tools follow a tiered safety model. See `docs/tools.md` for full detail.
                           │  django_session  │
                           │──────────────────│
                           │ session_key (PK) │
-                          │ session_data ◄── encrypted credentials inside
+                          │ session_data ◄── credentials inside
                           │ expire_date      │
                           └──────────────────┘
 ```
@@ -232,7 +230,7 @@ Write tools follow a tiered safety model. See `docs/tools.md` for full detail.
 `OAuthCode` — single-use, 10-minute TTL, deleted on redemption.  
 `OAuthToken` — permanent, upserted on re-auth (same `client_id + publisher_id` → same token).  
 `OAuthClient` — permanent, one per AI client install.  
-`credentials` in all models — Fernet-encrypted JSON `{publisherId, apiKey, apiSecret}`.
+`credentials` in all models — plain JSON `{publisherId, apiKey, apiSecret}`.
 
 ---
 
@@ -256,7 +254,6 @@ Executed in order on every request:
 
 | Concern | Mechanism |
 |---|---|
-| Credentials at rest | Fernet symmetric encryption (`EncryptedJSONField`) on every DB write |
 | Transport security | HTTPS enforced by `SecurityMiddleware` in production |
 | PKCE | Code verifier verified via SHA-256 at token exchange — no client secret needed |
 | Refresh token rotation | Atomic DB transaction; stolen token becomes single-use |
@@ -308,7 +305,6 @@ Running container
     · 1 worker, 50 threads
     · PORT from Railway env
     · DATABASE_URL → Railway PostgreSQL
-    · CREDENTIALS_ENCRYPTION_KEY → Fernet key (must be set manually)
 ```
 
 **Scaling constraint (historical):** 1 worker used to be an architectural requirement for SSE session affinity — `_sse_sessions`/`session_stats`/per-session queues lived in a worker's process memory, so `POST /mcp/message` had to land on the exact process holding `GET /mcp`'s state. That state is now externalised to Redis (`mcp_app/transport/redis_session_store.py`, `redis_message_queue.py`, `mcp_app/protocol/redis_session_stats.py` — see `docs/mcp-protocol.md` § "Cross-process routing"), so any worker/replica can serve any request for a session. `-w 1` remains for now as a staged rollout — verify the Redis-backed routing in production, then raise `-w`/`--threads`/replica count as a separate, revertible deploy. See `docs/deployment.md`.
@@ -321,7 +317,6 @@ Running container
 |---|---|---|---|
 | `DJANGO_SECRET_KEY` | Yes | — | Django cryptographic signing |
 | `DATABASE_URL` | Yes (prod) | SQLite | Postgres connection string |
-| `CREDENTIALS_ENCRYPTION_KEY` | Yes (prod) | Ephemeral (unsafe) | Fernet key for credential encryption |
 | `BASE_URL` | Yes (prod) | `http://localhost:8000` | OAuth metadata discovery, session redirect |
 | `CDS_BASE_URL` | No | `https://cds-beta.thepublive.com/publisher/{publisher_id}` | CDS host template |
 | `CMS_BASE_URL` | No | `https://cms-beta.thepublive.com/publisher/{publisher_id}` | CMS host template |
@@ -342,7 +337,6 @@ gunicorn 21         — WSGI server (gthread worker for SSE)
 psycopg2-binary     — PostgreSQL adapter
 dj-database-url     — parse DATABASE_URL into Django DATABASES dict
 whitenoise          — static file serving without nginx
-cryptography        — Fernet encryption for credentials at rest
 python-dotenv       — load .env in local dev
 requests            — outbound HTTP to CDS/CMS APIs
 newrelic 13         — APM, custom events, metrics
@@ -355,7 +349,7 @@ python-json-logger  — structured JSON log output
 
 | Topic | Document |
 |---|---|
-| Auth flows, OAuth PKCE, session TTL, encryption | `docs/auth.md` |
+| Auth flows, OAuth PKCE, session TTL | `docs/auth.md` |
 | MCP transports, session lifecycle, dispatch pipeline | `docs/mcp-protocol.md` |
 | New Relic events, metrics, transaction naming | `docs/newrelic.md` |
 | Docker, Railway, Fargate migration | `docs/deployment.md` |

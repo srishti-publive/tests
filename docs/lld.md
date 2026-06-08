@@ -17,11 +17,10 @@ publive_mcp/
 
 auth_app/
   models.py          — OAuthClient, OAuthCode, OAuthToken (data models)
-  fields.py          — EncryptedJSONField (transparent Fernet encryption)
-  crypto.py          — get_fernet(), encrypt_json(), decrypt_json()
   services.py        — session helpers, origin check, PKCE body parser, CDS validator
   views.py           — /register, /authorize, /token, /revoke, /connect, /auth/login
-  migrations/        — 0001–0011 (0011 drops orphan encrypted columns)
+  migrations/        — 0001–0012 (0011 drops orphan encrypted columns; 0012 reverts
+                        `credentials` to plain JSONField after encryption was removed)
 
 mcp_app/
   views.py           — entry points: health_check(), mcp_endpoint(), mcp_message() — thin routing only, delegates to protocol/ and transport/
@@ -129,54 +128,6 @@ Applied only when `Content-Type` contains `text/html`. Sets:
 
 ---
 
-## `auth_app/crypto.py`
-
-### Module state
-
-```python
-_fernet: Optional[Fernet] = None  # singleton, initialised once
-```
-
-### `get_fernet() → Fernet`
-
-1. If `_fernet` is not None, return it.
-2. Read `CREDENTIALS_ENCRYPTION_KEY` from env.
-3. If absent: `Fernet.generate_key()` → log WARNING → ephemeral key (unreadable after restart).
-4. If present: `Fernet(key.encode())`.
-5. Store in `_fernet`, return.
-
-### `encrypt_json(data: dict) → str`
-
-```
-data → json.dumps(separators=(",",":")) → bytes → Fernet.encrypt() → .decode() → str
-```
-
-Output is a URL-safe base64 Fernet token.
-
-### `decrypt_json(token: str) → dict`
-
-```
-token → .encode() → Fernet.decrypt() → bytes → json.loads() → dict
-```
-
-Raises `cryptography.fernet.InvalidToken` if the key is wrong or the token is malformed.
-
----
-
-## `auth_app/fields.py` — `EncryptedJSONField`
-
-Extends `models.TextField`. Three overrides:
-
-| Hook | Direction | Logic |
-|---|---|---|
-| `from_db_value(value, ...)` | DB → Python | `decrypt_json(value)` |
-| `to_python(value)` | string → Python | `decrypt_json(value)`; falls back to `json.loads()` for legacy plaintext (migration window) |
-| `get_prep_value(value)` | Python → DB | `encrypt_json(value)` if dict; otherwise `super()` |
-
-Python callers always assign/read plain `dict`s. Encryption is transparent.
-
----
-
 ## `auth_app/models.py`
 
 ### `OAuthClient`
@@ -200,7 +151,7 @@ code            VARCHAR(128)  UNIQUE
 client_id       VARCHAR(64)   INDEX
 redirect_uri    TEXT
 code_challenge  VARCHAR(256)
-credentials     TEXT          Fernet-encrypted JSON
+credentials     JSONB         {publisherId, apiKey, apiSecret}
 expires_at      TIMESTAMPTZ
 ```
 
@@ -215,11 +166,11 @@ token          VARCHAR(128)  UNIQUE
 client_id      VARCHAR(64)   INDEX, blank allowed
 publisher_id   VARCHAR(64)   INDEX, blank allowed
 refresh_token  VARCHAR(128)  UNIQUE, null allowed
-credentials    TEXT          Fernet-encrypted JSON
+credentials    JSONB         {publisherId, apiKey, apiSecret}
 created_at     TIMESTAMPTZ   auto_now_add, null allowed
 ```
 
-`publisher_id` is a plain indexed column so token lookup by `(client_id, publisher_id)` works without decrypting every row. Upsert pattern: `update_or_create(client_id=..., publisher_id=...)` — re-authorisation does not break in-flight sessions.
+`publisher_id` is a plain indexed column so token lookup by `(client_id, publisher_id)` works directly. Upsert pattern: `update_or_create(client_id=..., publisher_id=...)` — re-authorisation does not break in-flight sessions.
 
 `refresh_token` rotates on every use inside an atomic DB transaction. Stolen refresh tokens are single-use.
 
@@ -229,19 +180,15 @@ created_at     TIMESTAMPTZ   auto_now_add, null allowed
 
 ### `get_session_credentials(session) → dict | None`
 
-Handles both formats that may exist in `django_session` rows:
-- **Legacy** — `session["credentials"]` is already a plain `dict` (written before encryption was enabled): returned as-is.
-- **Current** — `session["credentials"]` is a Fernet-encrypted `str`: decrypted via `decrypt_json()`.
-
-Returns `None` if the key is absent, or if decryption/JSON-parsing fails (logs a warning and treats the session as expired rather than raising).
+Returns `session["credentials"]` if it's a plain `dict`; otherwise (absent, or some other type) returns `None`.
 
 ### `set_session_credentials(session, credentials: dict)`
 
 ```python
-session["credentials"] = encrypt_json(credentials)
+session["credentials"] = credentials
 ```
 
-Just encrypts and stores — it does **not** take a `remember_for_days` argument and does not touch `session_created_at`/`session_ttl_seconds`/`set_expiry()`. Those three are set directly in `auth_login()` (`auth_app/views.py`), which always writes `session_ttl_seconds = -1` (never expires) and `session.set_expiry(10 * 365 * 24 * 3600)` — a 10-year cookie ceiling. There is no per-login configurable TTL; `remember_for_days` does not exist anywhere in the code.
+Just stores the dict — it does **not** take a `remember_for_days` argument and does not touch `session_created_at`/`session_ttl_seconds`/`set_expiry()`. Those three are set directly in `auth_login()` (`auth_app/views.py`), which always writes `session_ttl_seconds = -1` (never expires) and `session.set_expiry(10 * 365 * 24 * 3600)` — a 10-year cookie ceiling. There is no per-login configurable TTL; `remember_for_days` does not exist anywhere in the code.
 
 ### `check_session_ttl(session) → bool`
 
@@ -311,7 +258,7 @@ Second element is always `None` (tokens have no expiry tracked here).
 
 ### `_resolve_oauth_token(token_value) → (dict | None, None, None)`
 
-`OAuthToken.objects.get(token=token_value)` → returns `oauth_token.credentials` (dict, auto-decrypted by `EncryptedJSONField`). Returns `(None, None, None)` on `DoesNotExist`. Re-raises any other exception.
+`OAuthToken.objects.get(token=token_value)` → returns `oauth_token.credentials` (plain `dict`, read directly from the `JSONField`). Returns `(None, None, None)` on `DoesNotExist`. Re-raises any other exception.
 
 ### `_resolve_session(request) → (dict | None, None, error_code | None)`
 
@@ -572,10 +519,9 @@ memory — which is what forced **exactly 1 worker** (`-w 1`; see
 `docs/deployment.md`). Both are now externalized to Redis:
 
 - **Registry** — `mcp_app/transport/redis_session_store.py`: `register_session`/
-  `get_session`/`close_session`, backed by `mcp:session:{id}` (credentials
-  Fernet-encrypted with the same `encrypt_json`/`CREDENTIALS_ENCRYPTION_KEY` used
-  for `EncryptedJSONField` in Postgres — see the module docstring's security
-  rationale) plus a `mcp:active_sessions` set for O(1) `SCARD` cluster-wide counts.
+  `get_session`/`close_session`, backed by `mcp:session:{id}` (credentials stored
+  as plain JSON, same shape as the Postgres-backed session/token storage) plus a
+  `mcp:active_sessions` set for O(1) `SCARD` cluster-wide counts.
 - **Queue** — `mcp_app/transport/redis_message_queue.py`: `push_message`/
   `pop_message`/`delete_queue`/`queue_depth`, backed by a capped Redis list
   `mcp:session_queue:{id}` consumed via `BLPOP` (chosen over Pub/Sub — drops
@@ -596,7 +542,7 @@ through to `push_message(..., maxsize=_MCP_QUEUE_MAXSIZE)`.
    client_name, _ = identify_mcp_client(request)
 
 2. active_on_open = register_session(session_id, credentials, token_expires_at)
-   # SET mcp:session:{id} {encrypted credentials, token_expires_at} EX 24h
+   # SET mcp:session:{id} {credentials, token_expires_at} EX 24h
    # SADD mcp:active_sessions {id}; SCARD → active_on_open   (all in one pipeline)
 3. session_trace_id = get_linking_metadata()["trace.id"]
    init_stats(session_id, session_trace_id)   # HSET mcp:session_stats:{id} {...}; full schema above
@@ -630,7 +576,7 @@ through to `push_message(..., maxsize=_MCP_QUEUE_MAXSIZE)`.
    client_name, client_version = identify_mcp_client(request)
    add_attrs([mcp.client_name, mcp.client_version])
 
-2. session_entry = get_session(session_id)   # GET mcp:session:{id}; decrypt_json; refresh TTL
+2. session_entry = get_session(session_id)   # GET mcp:session:{id}; parse JSON; refresh TTL
    if session_entry is None:                  # absent, expired, or undecryptable → forces reconnect
        add_attrs([("mcp.sse_session_missing", True)])
        record_metric("Custom/MCP/sse_session_missing_count", 1)
@@ -1041,7 +987,7 @@ Prompt text is truncated to 2000 characters.
 6. credentials = {"publisherId": publisher_id, "apiKey": api_key, "apiSecret": api_secret}
 7. OAuthCode.objects.create(code=code, client_id=client_id,
        redirect_uri=redirect_uri, code_challenge=code_challenge,
-       credentials=credentials,           # encrypted by EncryptedJSONField
+       credentials=credentials,           # stored as JSON
        expires_at=now + timedelta(minutes=10))
 8. Redirect to redirect_uri?code={code}&state={state}
 ```
@@ -1095,7 +1041,7 @@ oauth_code
   client_id      VARCHAR(64)   INDEX
   redirect_uri   TEXT
   code_challenge VARCHAR(256)
-  credentials    TEXT          Fernet-encrypted JSON
+  credentials    JSONB         {publisherId, apiKey, apiSecret}
   expires_at     TIMESTAMPTZ
 
 oauth_token
@@ -1104,7 +1050,7 @@ oauth_token
   client_id     VARCHAR(64)   INDEX
   publisher_id  VARCHAR(64)   INDEX
   refresh_token VARCHAR(128)  UNIQUE  NULL ok
-  credentials   TEXT          Fernet-encrypted JSON
+  credentials   JSONB         {publisherId, apiKey, apiSecret}
   created_at    TIMESTAMPTZ   NULL ok  auto
 
 django_session  (Django built-in)
@@ -1122,10 +1068,11 @@ django_session  (Django built-in)
 | 0001 | Creates `oauth_client`, `oauth_code`, `oauth_token` with plaintext credential columns |
 | 0002–0006 | Iterative schema changes (indexes, field additions) |
 | 0007 | Drops `ai_client` table (DB only — state not updated) |
-| 0008 | Adds `EncryptedJSONField` (`credentials` column) to `oauth_token` and `oauth_code` |
+| 0008 | Adds indexed `publisher_id` column to `oauth_token`; moves `credentials` to a `TextField` and backfills `publisher_id` from existing JSON (this briefly routed through a Fernet-encrypting field — see 0012) |
 | 0009 | Renames / adds `publisher_id` indexed column to `oauth_token` |
 | 0010 | `SeparateDatabaseAndState(DeleteModel('AIClient'))` — state-only; no DROP (table already gone from 0007) |
 | 0011 | Introspects tables, drops orphan `encrypted_api_secret`, `encrypted_api_key`, `encrypted_publisher_id` columns if present (added by now-reverted migrations) |
+| 0012 | Removes credential encryption: clears `oauth_code`/`oauth_token` (sample data only) and converts `credentials` from `TextField` back to plain `JSONField` |
 
 **Migration 0011 algorithm:**
 

@@ -6,22 +6,15 @@ constraint (see docs/deployment.md, docs/mcp-protocol.md): `GET /mcp` (open) and
 still find the session, because the registry lives in Redis rather than a
 worker's memory.
 
-`credentials` holds live CDS/CMS API secrets ({publisherId, apiKey, apiSecret}).
-Today they're encrypted at rest in Postgres (EncryptedJSONField, Fernet via
-CREDENTIALS_ENCRYPTION_KEY) and held in plaintext only in process memory for the
-session lifetime. Redis is a network-reachable store that would hold them for up
-to the session TTL — so we encrypt with the *same* Fernet key/helpers before
-every write, exactly like EncryptedJSONField does for Postgres. A malformed or
-undecryptable blob (wrong key, corruption) is treated as "no session", forcing
-the client to reconnect — the same fail-closed behavior EncryptedJSONField uses.
+`credentials` holds live CDS/CMS API secrets ({publisherId, apiKey, apiSecret}),
+stored as plain JSON in the session payload — same shape as the Postgres-backed
+session/token storage. A malformed entry (corruption, bad JSON) is treated as
+"no session", forcing the client to reconnect.
 """
 import json
 import logging
 from typing import Optional
 
-from cryptography.fernet import InvalidToken
-
-from auth_app.crypto import decrypt_json, encrypt_json
 from mcp_app.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -46,7 +39,7 @@ def register_session(session_id: str, credentials: dict, token_expires_at) -> in
     """Register a newly opened SSE session. Returns the cluster-wide active count."""
     client  = get_redis_client()
     payload = json.dumps({
-        "credentials":      encrypt_json(credentials or {}),
+        "credentials":      credentials or {},
         "token_expires_at": token_expires_at,  # always None today (see auth.py) — JSON-safe as-is
     })
     with client.pipeline() as pipe:
@@ -67,10 +60,10 @@ def get_session(session_id: str) -> Optional[tuple[dict, object]]:
 
     try:
         data        = json.loads(raw)
-        credentials = decrypt_json(data["credentials"])
-    except (ValueError, KeyError, InvalidToken):
+        credentials = data["credentials"]
+    except (ValueError, KeyError):
         logger.error(
-            "redis_session_store: undecryptable session entry, treating as absent: session=%s",
+            "redis_session_store: malformed session entry, treating as absent: session=%s",
             session_id,
         )
         return None

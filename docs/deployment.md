@@ -89,7 +89,6 @@ restartPolicyType  = "on_failure"
 | Var | Notes |
 |---|---|
 | `DJANGO_SECRET_KEY` | Generate: `python -c "import secrets; print(secrets.token_urlsafe(50))"` |
-| `CREDENTIALS_ENCRYPTION_KEY` | Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `BASE_URL` | Full public URL e.g. `https://your-app.up.railway.app` — used in OAuth metadata |
 | `NEW_RELIC_LICENSE_KEY` | Optional; NR is a no-op without it |
 | `CDS_BASE_URL` | Optional; defaults to `https://cds-beta.thepublive.com/publisher/{publisher_id}` |
@@ -173,8 +172,7 @@ recreate the exact problem this solves). The remaining requirements:
     ],
     "secrets": [
       {"name": "DJANGO_SECRET_KEY",           "valueFrom": "arn:aws:secretsmanager:..."},
-      {"name": "DATABASE_URL",                "valueFrom": "arn:aws:secretsmanager:..."},
-      {"name": "CREDENTIALS_ENCRYPTION_KEY",  "valueFrom": "arn:aws:secretsmanager:..."}
+      {"name": "DATABASE_URL",                "valueFrom": "arn:aws:secretsmanager:..."}
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
