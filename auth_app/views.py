@@ -102,6 +102,7 @@ def oauth_register(request: HttpRequest) -> JsonResponse:
             status=400,
         )
 
+    # os.urandom under the hood
     client_id: str = secrets.token_urlsafe(24)
 
     try:
@@ -272,6 +273,7 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
             code=code,
             client_id=client_id,
             redirect_uri=redirect_uri,
+            #  code_challenge = base64url(SHA256(code_verifier))
             code_challenge=code_challenge,
             credentials={"publisherId": publisher_id, "apiKey": api_key, "apiSecret": api_secret},
             expires_at=timezone.now() + timedelta(minutes=10),
@@ -348,7 +350,7 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
                 # Atomic rotation: old refresh token is replaced before the response is sent.
                 access_token = existing.token
                 client_id = existing.client_id
-                publisher_id = existing.credentials.get("publisherId", "")
+                publisher_id = existing.publisher_id
                 existing.refresh_token = new_refresh
                 existing.save(update_fields=["refresh_token"])
 
@@ -445,12 +447,13 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
 
         token: str       = secrets.token_urlsafe(32)
         new_refresh: str = secrets.token_urlsafe(32)
+        token_credentials = {k: v for k, v in credentials.items() if k != "publisherId"}
         OAuthToken.objects.create(
             token=token,
             client_id=oauth_client_id,
             publisher_id=publisher_id,
             refresh_token=new_refresh,
-            credentials=credentials,
+            credentials=token_credentials,
         )
 
         add_attrs([

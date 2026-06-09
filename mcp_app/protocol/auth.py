@@ -55,7 +55,10 @@ def _resolve_oauth_token(token_value: str):
     try:
         from auth_app.models import OAuthToken
         oauth_token = OAuthToken.objects.get(token=token_value)
-        return oauth_token.credentials, None, None
+        # Merge flat column so downstream clients always see publisherId regardless
+        # of whether the stored credentials JSON still contains it (old rows) or not (new rows).
+        credentials = {**oauth_token.credentials, "publisherId": oauth_token.publisher_id}
+        return credentials, None, None
     except Exception as exc:  # noqa: BLE001
         from auth_app.models import OAuthToken as _OAuthToken
         if not isinstance(exc, _OAuthToken.DoesNotExist):
