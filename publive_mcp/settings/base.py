@@ -105,8 +105,19 @@ SESSION_SAVE_EVERY_REQUEST = True
 
 # ── OAuth security ────────────────────────────────────────────────────────────
 OAUTH_ALLOWED_ORIGINS = [
+    # Anthropic / Claude (web)
     "https://claude.ai",
     "https://api.claude.ai",
+    # OpenAI / ChatGPT (web)
+    "https://chatgpt.com",
+    "https://chat.openai.com",
+    "https://platform.openai.com",
+    # Google Gemini (web)
+    "https://gemini.google.com",
+    "https://aistudio.google.com",
+    # Microsoft Copilot (web)
+    "https://copilot.microsoft.com",
+    "https://www.bing.com",
 ]
 
 # Dynamic client registration (RFC 7591 / OAuth 2.1) is open to any client —

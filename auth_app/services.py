@@ -65,8 +65,19 @@ def check_origin(request: HttpRequest) -> Optional[JsonResponse]:
         return None
 
     allowed: set[str] = set(getattr(settings, "OAUTH_ALLOWED_ORIGINS", [
+        # Anthropic / Claude (web)
         "https://claude.ai",
         "https://api.claude.ai",
+        # OpenAI / ChatGPT (web)
+        "https://chatgpt.com",
+        "https://chat.openai.com",
+        "https://platform.openai.com",
+        # Google Gemini (web)
+        "https://gemini.google.com",
+        "https://aistudio.google.com",
+        # Microsoft Copilot (web)
+        "https://copilot.microsoft.com",
+        "https://www.bing.com",
     ]))
     allowed.add(settings.BASE_URL.rstrip("/"))  # always allow same-origin
 
@@ -170,16 +181,13 @@ def validate_cds_credentials(
     api_secret: str,
 ) -> tuple[bool, int]:
     """Call the Publive CDS API to verify credentials; return (is_valid, http_status).
-
     Raises requests.RequestException if the CDS is unreachable — callers must handle it.
     Records latency and HTTP status as New Relic custom attributes on the current transaction.
     """
     token: str = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     t0: float = time.perf_counter()
     # Validate against a documented, always-present CDS endpoint. `/posts/?limit=1`
-    # is the smallest authenticated GET that exists for every publisher. The old
-    # `/publisher-data/` path is not a real route (the API answers it with
-    # 400 "Unknown Endpoint Path"), so it could never return a 2xx.
+    # is the smallest authenticated GET that exists for every publisher. 
     # Use the same env-configurable base URL as the CDS client (CDS_BASE_URL).
     base = settings.CDS_BASE_URL.format(publisher_id=publisher_id)
     resp = requests.get(
@@ -197,7 +205,5 @@ def validate_cds_credentials(
         "CDS validation: publisher=%s status=%d latency_ms=%.2f",
         publisher_id, resp.status_code, latency_ms,
     )
-    # Only a 2xx means the credentials are genuinely valid. The previous check
-    # (status_code not in (401, 403)) wrongly treated 400 and 5xx as success,
-    # letting bad credentials through to authorization-code issuance.
+    # Only a 2xx means the credentials are genuinely valid. 
     return 200 <= resp.status_code < 300, resp.status_code

@@ -6,7 +6,8 @@ description: >
   Publive API is missing a tool", or wants to compare the publive-docs API
   reference against the tools implemented in this MCP server and create any
   that are missing. Manual/on-demand — run it whenever you want to check, it
-  is not scheduled.
+  is not scheduled. For updating/patching *existing* tools that have drifted
+  from the docs, use [[diff-api-tools]] instead.
 version: 1.0.0
 ---
 
