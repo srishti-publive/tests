@@ -9,7 +9,7 @@ python manage.py showmigrations auth_app 2>&1 || true
 
 echo "[entrypoint] starting gunicorn on port ${PORT:-8000}"
 exec gunicorn publive_mcp.wsgi \
-    -w 1 --threads 50 \
+    -w 1 --threads 4 \
     -b 0.0.0.0:"${PORT:-8000}" \
     --timeout 60 \
     --access-logfile -
