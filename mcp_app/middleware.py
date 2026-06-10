@@ -21,7 +21,9 @@ _RULES: list[tuple[str, Optional[str], int, int, str]] = [
     ("/register",    "POST", 20,  60, "ip"),      # client registration
     ("/authorize",   None,   20,  60, "ip"),      # OAuth authorize
     ("/token",       "POST", 20,  60, "ip"),      # token exchange/refresh
-    ("/mcp",         None,   300, 60, "token"),   # MCP tool calls
+    # 120/min keeps any single token below ~half of total server capacity
+    # (4 gthread workers × ~0.8 s/tool-call ≈ 3.5 rps ≈ 210/min server-wide).
+    ("/mcp",         None,   120, 60, "token"),   # MCP tool calls
 ]
 
 

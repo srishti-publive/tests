@@ -12,7 +12,7 @@ import requests
 
 from mcp_app.nr_utils import add_attrs, notice_err, set_txn_name
 
-from .shared import build_base_url, build_basic_auth_headers, slugify_url_path
+from .shared import build_base_url, build_basic_auth_headers, build_pooled_session, slugify_url_path
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 _CDS_BASE = settings.CDS_BASE_URL
 _REQUEST_TIMEOUT = 5   # seconds per attempt
 _RETRY_BACKOFF   = 1   # seconds between attempts
+
+_session = build_pooled_session()
 
 
 def classify_cds_error(exc, http_status) -> str:
@@ -72,7 +74,7 @@ def cds_get(credentials: dict, path: str, params=None):
             logger.warning("CDS retry attempt %d: path=%s publisher=%s", attempt, path, publisher_id)
 
         try:
-            resp = requests.get(
+            resp = _session.get(
                 url,
                 headers={"Authorization": headers["Authorization"]},
                 params=clean_params,

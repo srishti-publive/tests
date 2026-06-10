@@ -85,7 +85,7 @@ def _get_queue(session_id: str):
     return entry["queue"] if entry else None
 
 
-def push_message(session_id: str, message: dict, timeout: float = 30.0) -> bool:
+def push_message(session_id: str, message: dict, timeout: float = 5.0) -> bool:
     q = _get_queue(session_id)
     if q is None:
         return False
@@ -322,12 +322,14 @@ def handle_sse_message(request) -> HttpResponse:
             increment(session_id, "error_count")
 
         if response_msg is not None:
-            ok = push_message(session_id, response_msg, timeout=30.0)
+            # 5 s cap: with few worker threads, one thread blocked on a dead
+            # client's full queue is a large share of total server capacity.
+            ok = push_message(session_id, response_msg, timeout=5.0)
             if not ok:
                 record_metric("Custom/MCP/queue_overflow_count", 1)
                 add_attrs([("mcp.queue_overflow", True)])
                 logger.error(
-                    "MCP SSE queue full (maxsize=%d) after 30 s: session=%s — response dropped",
+                    "MCP SSE queue full (maxsize=%d) after 5 s: session=%s — response dropped",
                     _MCP_QUEUE_MAXSIZE, session_id,
                 )
                 return JsonResponse({"ok": True})

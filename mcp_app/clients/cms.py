@@ -14,13 +14,15 @@ import requests
 
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric
 
-from .shared import build_base_url, build_basic_auth_headers
+from .shared import build_base_url, build_basic_auth_headers, build_pooled_session
 
 logger = logging.getLogger(__name__)
 
 # Env-configurable (CMS_BASE_URL); defaults to the beta host in settings.
 _CMS_BASE        = settings.CMS_BASE_URL
 _REQUEST_TIMEOUT = 10  # seconds
+
+_session = build_pooled_session()
 
 
 def classify_cms_error(exc, http_status) -> str:
@@ -113,7 +115,7 @@ def cms_get(credentials: dict, path: str, params=None):
     newrelic.agent.add_custom_span_attribute("cms.publisher_id", publisher_id)
     t0 = time.perf_counter()
     try:
-        resp       = requests.get(url, headers=build_basic_auth_headers(credentials), params=clean_params, timeout=_REQUEST_TIMEOUT)
+        resp       = _session.get(url, headers=build_basic_auth_headers(credentials), params=clean_params, timeout=_REQUEST_TIMEOUT)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not resp.ok:
             exc          = Exception(f"HTTP {resp.status_code}")
@@ -147,7 +149,7 @@ def cms_post(credentials: dict, path: str, body: dict):
     newrelic.agent.add_custom_span_attribute("cms.publisher_id", publisher_id)
     t0 = time.perf_counter()
     try:
-        resp       = requests.post(url, headers=build_basic_auth_headers(credentials), json=body, timeout=_REQUEST_TIMEOUT)
+        resp       = _session.post(url, headers=build_basic_auth_headers(credentials), json=body, timeout=_REQUEST_TIMEOUT)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not resp.ok:
             exc          = Exception(f"HTTP {resp.status_code}")
@@ -181,7 +183,7 @@ def cms_patch(credentials: dict, path: str, body: dict):
     newrelic.agent.add_custom_span_attribute("cms.publisher_id", publisher_id)
     t0 = time.perf_counter()
     try:
-        resp       = requests.patch(url, headers=build_basic_auth_headers(credentials), json=body, timeout=_REQUEST_TIMEOUT)
+        resp       = _session.patch(url, headers=build_basic_auth_headers(credentials), json=body, timeout=_REQUEST_TIMEOUT)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not resp.ok:
             exc          = Exception(f"HTTP {resp.status_code}")
@@ -215,7 +217,7 @@ def cms_delete(credentials: dict, path: str):
     newrelic.agent.add_custom_span_attribute("cms.publisher_id", publisher_id)
     t0 = time.perf_counter()
     try:
-        resp       = requests.delete(url, headers=build_basic_auth_headers(credentials), timeout=_REQUEST_TIMEOUT)
+        resp       = _session.delete(url, headers=build_basic_auth_headers(credentials), timeout=_REQUEST_TIMEOUT)
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         if not resp.ok:
             exc          = Exception(f"HTTP {resp.status_code}")
