@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Connected — Publive MCP{% endblock %}
 
@@ -120,27 +121,10 @@
 
   <div class="actions">
     <a href="https://claude.ai" class="btn-primary">Return to Claude →</a>
-    <button class="btn-ghost" onclick="logout()">Disconnect account</button>
+    <button class="btn-ghost" id="logoutBtn">Disconnect account</button>
   </div>
 {% endblock %}
 
 {% block extra_js %}
-<script>
-  fetch('/auth/status', { credentials: 'include' })
-    .then(r => r.json())
-    .then(data => {
-      if (!data.authenticated) return;
-      document.getElementById('publisherIdDisplay').textContent = data.publisherId || '—';
-      if (data.authenticatedAt) {
-        document.getElementById('connectedAt').textContent =
-          new Date(data.authenticatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      }
-    })
-    .catch(() => {});
-
-  async function logout() {
-    await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
-    window.location.href = '/connect';
-  }
-</script>
+<script src="{% static 'auth/success.js' %}"></script>
 {% endblock %}
