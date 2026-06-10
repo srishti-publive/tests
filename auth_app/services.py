@@ -35,7 +35,6 @@ def set_session_credentials(session, credentials: dict) -> None:
 def check_session_ttl(session) -> bool:
     """Return True if the session has exceeded its original TTL.
 
-
     Django's rolling SESSION_SAVE_EVERY_REQUEST is intentionally disabled so
     these stored values are the authoritative expiry source.
     """
@@ -111,12 +110,11 @@ def is_loopback_redirect_uri(uri: str) -> bool:
 def is_registrable_redirect_uri(uri: str) -> bool:
     """Return True for redirect URIs acceptable at dynamic client registration.
 
-    Per RFC 7591 / OAuth 2.1, registration is open to any client — the server
-    doesn't pre-approve specific apps by URL. The only requirement is transport
-    security: either HTTPS (web/mobile callbacks) or a loopback address (native
-    apps per RFC 8252 §7.3, which can't use HTTPS for an ephemeral local port).
-    Plain http:// to a non-loopback host is rejected as it would leak the
-    authorization code over an insecure channel.
+    Per RFC 7591 / OAuth 2.1, registration is open to any client 
+    — the server doesn't pre-approve specific apps by URL. 
+    The only requirement is transport security: either HTTPS (web/mobile callbacks)
+    or a loopback address (native apps per RFC 8252 §7.3, which can't use HTTPS for an ephemeral local port).
+    Plain http:// to a non-loopback host is rejected as it would leak the authorization code over an insecure channel.
     """
     try:
         parts = urlsplit(uri)
@@ -207,3 +205,4 @@ def validate_cds_credentials(
     )
     # Only a 2xx means the credentials are genuinely valid. 
     return 200 <= resp.status_code < 300, resp.status_code
+    

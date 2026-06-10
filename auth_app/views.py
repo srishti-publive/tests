@@ -167,8 +167,10 @@ def _validate_authorize_request(
 
     if not client_id:
         return "invalid_request", "client_id is required"
-    oauth_client = OAuthClient.objects.get(client_id=client_id)
-
+    try:
+        oauth_client = OAuthClient.objects.get(client_id=client_id)
+    except OAuthClient.DoesNotExist:
+        return "invalid_client", "Unknown client_id. Please reconnect so your client re-registers."
 
     registered_uri: str = oauth_client.redirect_uri or ""
     if not registered_uri:
@@ -210,12 +212,12 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
         ("auth.client_id", client_id),
     ])
 
-    publisher_id: str          = request.POST.get("publisherId", "").strip()
-    api_key: str               = request.POST.get("apiKey", "").strip()
-    api_secret: str            = request.POST.get("apiSecret", "").strip()
-    redirect_uri: str          = request.POST.get("redirect_uri", "")
-    state: str                 = request.POST.get("state", "")
-    code_challenge: str        = request.POST.get("code_challenge", "")
+    publisher_id: str = request.POST.get("publisherId", "").strip()
+    api_key: str = request.POST.get("apiKey", "").strip()
+    api_secret: str = request.POST.get("apiSecret", "").strip()
+    redirect_uri: str = request.POST.get("redirect_uri", "")
+    state: str = request.POST.get("state", "")
+    code_challenge: str = request.POST.get("code_challenge", "")
     code_challenge_method: str = request.POST.get("code_challenge_method", "S256")
 
     ctx: dict = {
@@ -375,7 +377,7 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
             logger.warning("OAuth token: unsupported grant_type=%s client=%s", grant_type, data.get("client_id"))
             return JsonResponse({"error": "unsupported_grant_type"}, status=400)
 
-        code: str          = data.get("code", "")
+        code: str = data.get("code", "")
         code_verifier: str = data.get("code_verifier", "")
 
         try:
@@ -445,7 +447,7 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
                 "refresh_token": existing.refresh_token,
             })
 
-        token: str       = secrets.token_urlsafe(32)
+        token: str = secrets.token_urlsafe(32)
         new_refresh: str = secrets.token_urlsafe(32)
         token_credentials = {k: v for k, v in credentials.items() if k != "publisherId"}
         OAuthToken.objects.create(
