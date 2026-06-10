@@ -170,7 +170,19 @@ def _validate_authorize_request(
     try:
         oauth_client = OAuthClient.objects.get(client_id=client_id)
     except OAuthClient.DoesNotExist:
-        return "invalid_client", "Unknown client_id. Please reconnect so your client re-registers."
+        # Clients like Claude Desktop cache their client_id and may present one
+        # this server has no record of (e.g. after a DB wipe, or an ID minted by
+        # the client platform itself). Auto-registering here is security-equivalent
+        # to the open /register endpoint: PKCE still binds the auth code, the
+        # redirect URI must pass the same https/loopback rules, and the user
+        # still has to submit valid Publive credentials.
+        if not redirect_uri or not is_registrable_redirect_uri(redirect_uri):
+            return "invalid_client", "Unknown client_id and no acceptable redirect_uri to auto-register."
+        oauth_client = OAuthClient.objects.create(client_id=client_id, redirect_uri=redirect_uri)
+        logger.info(
+            "OAuth authorize: auto-registered unknown client_id=%s redirect_uri=%s",
+            client_id, redirect_uri,
+        )
 
     registered_uri: str = oauth_client.redirect_uri or ""
     if not registered_uri:
