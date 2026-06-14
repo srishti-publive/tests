@@ -1,1731 +1,2100 @@
-# auth.md — Complete Authentication & Authorization Reference
+# Publive MCP Server - End-to-End Project Reference
 
-## Table of Contents
+This document explains the project from start to finish: how the server boots,
+which endpoints exist, which function each endpoint enters, how authentication
+works, how MCP JSON-RPC requests are dispatched, how tools call Publive APIs,
+and where state is stored.
 
-1. [Authentication Architecture Overview](#1-authentication-architecture-overview)
-2. [Complete User Registration Flow](#2-complete-user-registration-flow)
-3. [Login Flow (Session-based)](#3-login-flow-session-based)
-4. [OAuth + PKCE Flow](#4-oauth--pkce-flow)
-5. [Access Token & Refresh Token Flow](#5-access-token--refresh-token-flow)
-6. [SSE Transport Authentication Flow](#6-sse-transport-authentication-flow)
-7. [HTTP Transport Authentication Flow](#7-http-transport-authentication-flow)
-8. [MCP Client → Server Authentication Flow](#8-mcp-client--server-authentication-flow)
-9. [Database Deep Dive](#9-database-deep-dive)
-10. [Middleware Analysis](#10-middleware-analysis)
-11. [Authorization Logic](#11-authorization-logic)
-12. [Session Management](#12-session-management)
-13. [Error Handling Paths](#13-error-handling-paths)
-14. [Complete Sequence Diagrams](#14-complete-sequence-diagrams)
-15. [Source Code Traceability](#15-source-code-traceability)
+The project is a Django application that exposes Publive CDS and CMS APIs as MCP
+tools for AI clients such as Claude Desktop, Cursor, ChatGPT-style MCP clients,
+and other SDKs.
 
----
+Current code inventory:
 
-## 1. Authentication Architecture Overview
+- CDS tools: 22 read-only tools
+- CMS tools: 47 editorial/write/validation/account tools
+- Total tool schemas in code: 69
+- Main MCP protocol version returned by the server: `2024-11-05`
 
-- **Identity**: Who is calling — which `publisherId` owns this session?
-- **Credential forwarding**: The MCP server must hold `publisherId`, `apiKey`, and `apiSecret` to forward downstream requests to the Publive API on behalf of that caller.
-
-### Two Auth Flows
-
-| Flow | Intended Caller | Entry Point | Token Issued |
-|------|----------------|-------------|--------------|
-| **OAuth 2.0 + PKCE** | API clients: Claude Desktop, Cursor, ChatGPT SDK | `GET /authorize` → `POST /token` | Bearer token (`OAuthToken`) |
-| **Session-based** | Browser users at `/connect` page | `POST /auth/login` | Django session cookie |
-
-### Why PKCE?
-
-PKCE (Proof Key for Code Exchange, RFC 7636) prevents **authorization code interception attacks**. Native desktop apps (Claude Desktop, Cursor) receive the authorization code via a redirect to `http://localhost:<port>`. Any malicious process running on the same machine could register the same redirect URI and intercept the code. PKCE binds the code to the original requester:
-
-1. The client generates a random `code_verifier` (never sent in the authorization request).
-2. The client computes `code_challenge = BASE64URL(SHA256(code_verifier))` and sends only the challenge.
-3. When exchanging the code for a token, the client sends the original `code_verifier`.
-4. The server recomputes the challenge and compares — only the original client can produce the matching verifier.
-
-This server enforces `S256` only. Plain (`code_challenge_method=plain`) is not advertised or validated.
-
-### How MCP Clients Authenticate
-
-```
-MCP Client                         This Server
-───────────                        ────────────
-1. Discover metadata ──────────────► GET /.well-known/oauth-authorization-server
-                    ◄────────────── Authorization + token endpoints advertised
-
-2. Register client  ──────────────► POST /register
-                    ◄────────────── { client_id }
-
-3. Open auth form   ──────────────► GET /authorize?client_id=...&code_challenge=...
-                    ◄────────────── HTML form (or redirect if pre-authorized)
-
-4. Submit creds     ──────────────► POST /authorize (publisherId, apiKey, apiSecret)
-                    ◄────────────── 302 → redirect_uri?code=...&state=...
-
-5. Exchange code    ──────────────► POST /token (code, code_verifier)
-                    ◄────────────── { access_token, refresh_token }
-
-6. Call MCP tools   ──────────────► GET /mcp  Authorization: Bearer <token>
-                    ◄────────────── SSE stream with endpoint URL
-
-7. Send JSON-RPC    ──────────────► POST /mcp/message?sessionId=<uuid>
-                    ◄────────────── { ok: true }  (response pushed over SSE)
-```
-
-### Auth Differences Between SSE and HTTP Transports
-
-| Aspect | SSE Transport | HTTP Transport |
-|--------|--------------|----------------|
-| Trigger | `GET /mcp` | `POST /mcp` |
-| Auth point | Once at connection open | Every request |
-| Credential storage | In-memory `_sse_sessions` dict for session lifetime | Not stored; resolved per request |
-| Session identity | UUID generated at connection time | SHA-256 of Bearer token prefix or Django session key |
-| Credential re-check | Never after connection open | On every POST |
-| Supports session cookie | Yes | Yes |
-
-### All Security Mechanisms
-
-1. **PKCE S256** — prevents code interception for native clients
-2. **CDS credential validation** — credentials are verified against the Publive API before any token or session is issued
-3. **Origin allowlist** (`check_origin`) — web OAuth requests must come from approved origins (Claude.ai, ChatGPT, Gemini, Copilot, Bing, same-origin)
-4. **Redirect URI validation** — registered URI must be HTTPS or loopback; matching enforces exact match or same-loopback-host-any-port (RFC 8252)
-5. **Authorization code TTL** — codes expire 10 minutes after issuance and are deleted on exchange (single-use)
-6. **Rate limiting** — sliding-window caps per IP or token prefix on all auth and MCP endpoints
-7. **CSRF exemption is explicit** — only endpoints that process machine-to-machine OAuth flows are `@csrf_exempt`; browser login forms use Django session state
-8. **Session absolute TTL** — server-side TTL stored in the session prevents rolling cookie attacks; `SESSION_SAVE_EVERY_REQUEST = True` keeps the cookie fresh but the server-side deadline is authoritative
-9. **Security response headers** — CSP, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy on all HTML responses
-10. **Atomic refresh token rotation** — `select_for_update()` inside `transaction.atomic()` prevents two simultaneous refresh requests from both succeeding
-
-### Architecture Diagram
-
-```mermaid
-graph TB
-    subgraph Clients
-        A[Claude Desktop / Cursor]
-        B[Web Browser]
-        C[ChatGPT / Gemini SDK]
-    end
-
-    subgraph auth_app
-        REG["/register\noauth_register()"]
-        AUTH["/authorize\noauth_authorize()"]
-        TOKEN["/token\noauth_token()"]
-        REVOKE["/revoke\noauth_revoke()"]
-        LOGIN["/auth/login\nauth_login()"]
-        STATUS["/auth/status\nauth_status()"]
-        LOGOUT["/auth/logout\nauth_logout()"]
-        USERINFO["/userinfo\noauth_userinfo()"]
-        META["/.well-known/*\nMetadata endpoints"]
-    end
-
-    subgraph mcp_app
-        EP["/mcp\nmcp_endpoint()"]
-        MSG["/mcp/message\nsse_message()"]
-        RC[resolve_credentials()]
-        SSE[open_sse_connection()]
-        HTTP[handle_http_request()]
-        DISP[dispatch_jsonrpc()]
-    end
-
-    subgraph Database
-        OC[(oauth_client)]
-        OCO[(oauth_code)]
-        OT[(oauth_token)]
-        DS[(django_session)]
-    end
-
-    subgraph Publive API
-        CDS[CDS API\ncds-beta.thepublive.com]
-    end
-
-    A -->|"1. Register"| REG
-    REG --> OC
-    A -->|"2. Authorize + PKCE"| AUTH
-    AUTH -->|"Validate creds"| CDS
-    AUTH --> OCO
-    A -->|"3. Exchange code"| TOKEN
-    TOKEN --> OCO
-    TOKEN --> OT
-
-    B -->|"Login form"| LOGIN
-    LOGIN -->|"Validate creds"| CDS
-    LOGIN --> DS
-
-    A -->|"Bearer token"| EP
-    B -->|"Session cookie"| EP
-    EP --> RC
-    RC -->|"Bearer"| OT
-    RC -->|"Cookie"| DS
-    EP -->|"GET"| SSE
-    EP -->|"POST"| HTTP
-    SSE --> DISP
-    HTTP --> DISP
-    MSG --> SSE
-```
+Note: older docs in the repository may mention 61 tools or in-memory SSE state.
+The current code uses Redis for SSE sessions, SSE queues, session stats, prompt
+rate limits, and Django cache-backed rate limits.
 
 ---
 
-## 2. Complete User Registration Flow
+## 1. Project Structure
 
-Registration creates an OAuth 2.0 client record that binds a `client_id` to a `redirect_uri`. This is the Dynamic Client Registration step from RFC 7591.
+Top-level Django project:
 
-### Call Chain
+```text
+publive_mcp/
+  urls.py                 Root URL include
+  wsgi.py                 WSGI entrypoint wrapped with New Relic
+  settings/
+    base.py               Shared settings
+    local.py              Local development overrides
+    prod.py               Railway/production overrides
 
-```
-Client
- → POST /register
- → oauth_register()          [auth_app/views.py:74]
- → check_origin()            [auth_app/services.py:56]
- → is_registrable_redirect_uri()  [auth_app/services.py:111]
- → OAuthClient.objects.create()   [auth_app/models.py:5]
- → Database: INSERT INTO oauth_client
-```
+auth_app/
+  urls.py                 OAuth and browser-session auth routes
+  views.py                Auth endpoint handlers
+  services.py             Auth helper logic
+  models.py               OAuthClient, OAuthCode, OAuthToken
+  templates/              Login, authorize, success pages
+  static/auth/            Browser JS for auth pages
 
-### Function-by-Function Breakdown
-
-**`oauth_register`**
-```
-File:      auth_app/views.py
-Function:  oauth_register(request: HttpRequest) -> JsonResponse
-Called By: Django URL router (POST /register)
-Calls:     check_origin(), is_registrable_redirect_uri(), OAuthClient.objects.create()
-Purpose:   Validate the registration request, generate a client_id, persist the
-           OAuthClient record, return the client_id to the registering party.
-```
-
-Steps inside `oauth_register`:
-1. `check_origin(request)` — verifies `Origin` header is in the allowlist (or absent, meaning desktop client)
-2. Parses JSON body; accepts both `redirect_uris` (list, legacy) and `redirect_uri` (string)
-3. `is_registrable_redirect_uri(redirect_uri)` — validates the URI is HTTPS or loopback
-4. `secrets.token_urlsafe(24)` — generates a cryptographically random `client_id` (32 URL-safe chars from `os.urandom`)
-5. `OAuthClient.objects.create(client_id=..., redirect_uri=...)` — writes to DB
-6. Returns `{ client_id, client_id_issued_at, redirect_uris }` with HTTP 201
-
-**`check_origin`**
-```
-File:      auth_app/services.py
-Function:  check_origin(request: HttpRequest) -> Optional[JsonResponse]
-Called By: oauth_register(), oauth_token()
-Calls:     settings.OAUTH_ALLOWED_ORIGINS
-Purpose:   Block cross-origin requests from untrusted web origins.
-           Desktop MCP clients (no Origin header) are unconditionally allowed.
-           Returns None if allowed, 403 JsonResponse if blocked.
+mcp_app/
+  urls.py                 Health and MCP routes
+  views/                  Thin HTTP routing layer
+  protocol/               JSON-RPC dispatch, auth resolution, session helpers
+  transport/              Streamable HTTP and SSE transport handlers
+  cds/                    CDS read-only tools
+  cms/                    CMS tools
+  clients/                Publive CDS/CMS HTTP clients
+  middleware.py           Rate limiting, request id, security headers
+  redis_client.py         Shared raw redis-py client
+  nr_utils.py             New Relic wrappers
+  prompt_capture.py       Prompt extraction and observability
 ```
 
-**`is_registrable_redirect_uri`**
-```
-File:      auth_app/services.py
-Function:  is_registrable_redirect_uri(uri: str) -> bool
-Called By: oauth_register()
-Calls:     urlsplit(), is_loopback_redirect_uri()
-Purpose:   Enforce that redirect URIs are either HTTPS (any host) or loopback HTTP
-           (localhost/127.0.0.1/::1 any port). Plain http:// to a non-loopback host
-           is rejected — it would expose the authorization code in plaintext.
-```
+The server has two large responsibilities:
 
-**`is_loopback_redirect_uri`**
-```
-File:      auth_app/services.py
-Function:  is_loopback_redirect_uri(uri: str) -> bool
-Called By: is_registrable_redirect_uri(), redirect_uris_match()
-Calls:     urlsplit()
-Purpose:   Return True for http://localhost:<port>/... or http://127.0.0.1:<port>/...
-           URIs. Desktop apps cannot use HTTPS for ephemeral local ports (RFC 8252 §7.3).
-```
-
-### Database Write
-
-**Table**: `oauth_client`
-
-| Column | Value |
-|--------|-------|
-| `id` | Auto-incremented BigInt primary key |
-| `client_id` | `secrets.token_urlsafe(24)` — URL-safe random string |
-| `redirect_uri` | From request body `redirect_uri` (or first element of `redirect_uris`) |
-| `created_at` | `auto_now_add=True` — set by Django ORM at INSERT time |
-
-### Error Conditions
-
-| Condition | Response |
-|-----------|----------|
-| Origin header present but not in allowlist | 403 `{ error: "invalid_origin" }` |
-| `redirect_uri` is plain HTTP to non-loopback | 400 `{ error: "invalid_redirect_uri" }` |
-| DB insert fails (e.g. duplicate client_id collision) | 500 (re-raised exception) |
-| Body is not valid JSON | `body = {}`, `redirect_uri = ""` (empty string is allowed — no redirect_uri) |
+1. Authenticate a caller and obtain Publive credentials:
+   `publisherId`, `apiKey`, `apiSecret`.
+2. Accept MCP JSON-RPC requests and run the correct Publive tool using those
+   credentials.
 
 ---
 
-## 3. Login Flow (Session-based)
+## 2. Boot Flow
 
-Session-based login is for human browser users. The publisher submits their credentials at `GET /connect`, which renders a form whose POST is handled by `auth_login`.
+### Local development
 
-### Call Chain
+Command:
 
-```
-Browser
- → POST /auth/login (JSON body: publisherId, apiKey, apiSecret)
- → auth_login()                    [auth_app/views.py:495]
- → validate_cds_credentials()      [auth_app/services.py:177]
-   → requests.get(CDS /posts/?limit=1, Basic Auth)
-   → Publive CDS API
- → set_session_credentials()       [auth_app/services.py:30]
- → request.session.set_expiry()
- → Database: UPDATE django_session
+```bash
+python manage.py runserver
 ```
 
-### Function-by-Function Breakdown
+Flow:
 
-**`auth_login`**
-```
-File:      auth_app/views.py
-Function:  auth_login(request: HttpRequest) -> JsonResponse
-Called By: Django URL router (POST /auth/login)
-Calls:     validate_cds_credentials(), set_session_credentials()
-Purpose:   Validate JSON body, verify credentials against Publive CDS API,
-           create a long-lived server session, return success redirect path.
-```
-
-Steps inside `auth_login`:
-1. Parse JSON body — return 400 if not valid JSON
-2. Extract and strip `publisherId`, `apiKey`, `apiSecret`
-3. Return 400 if any field is empty
-4. Call `validate_cds_credentials(publisher_id, api_key, api_secret)`
-5. If `ok == True`:
-   - `set_session_credentials(request.session, {...})` — stores credentials in `session["credentials"]`
-   - `request.session["authenticatedAt"] = timezone.now().isoformat()`
-   - `request.session["session_created_at"] = int(timezone.now().timestamp())` — epoch int for TTL arithmetic
-   - `request.session["session_ttl_seconds"] = -1` — never expires via server-side check
-   - `request.session.set_expiry(10 * 365 * 24 * 3600)` — 10-year cookie ceiling
-   - Return `{ success: True, redirectTo: "/auth/success" }`
-6. If `ok == False` and status 401/403: return 401 `{ error: "Invalid credentials." }`
-7. If `ok == False` and other status: return 500 `{ error: "HTTP <N>" }`
-
-**`validate_cds_credentials`**
-```
-File:      auth_app/services.py
-Function:  validate_cds_credentials(publisher_id, api_key, api_secret) -> tuple[bool, int]
-Called By: auth_login(), oauth_authorize() (POST)
-Calls:     requests.get(), base64.b64encode()
-Purpose:   Verify credentials are accepted by the Publive CDS API. Makes a live
-           HTTP call to /posts/?limit=1 with Basic Auth. Returns (True, 200) on
-           2xx, (False, N) on any non-2xx. Raises requests.RequestException on
-           network failure — callers must handle it.
+```text
+manage.py
+  -> sets DJANGO_SETTINGS_MODULE to publive_mcp.settings
+  -> publive_mcp/settings/__init__.py selects local or prod settings
+     from RAILWAY_ENVIRONMENT or DJANGO_ENV
+  -> django.core.management.execute_from_command_line()
+  -> Django loads settings, URLs, middleware, apps
+  -> development server starts
 ```
 
-Steps inside `validate_cds_credentials`:
-1. Build Basic Auth header: `base64.b64encode(f"{api_key}:{api_secret}".encode())`
-2. Format URL: `settings.CDS_BASE_URL.format(publisher_id=publisher_id)` + `/posts/`
-3. `requests.get(url, params={"limit": 1}, headers={"Authorization": "Basic ..."}, timeout=10)`
-4. Record latency and HTTP status as New Relic attributes
-5. Return `(200 <= resp.status_code < 300, resp.status_code)`
+Important local commands:
 
-**`set_session_credentials`**
-```
-File:      auth_app/services.py
-Function:  set_session_credentials(session, credentials: dict) -> None
-Called By: auth_login()
-Calls:     (none — direct session dict write)
-Purpose:   Store the credentials dict under session["credentials"].
+```bash
+python manage.py migrate
+python manage.py makemigrations
+python manage.py test
+python manage.py collectstatic --noinput
 ```
 
-**`get_session_credentials`**
-```
-File:      auth_app/services.py
-Function:  get_session_credentials(session) -> Optional[dict]
-Called By: auth_status(), auth_logout(), _resolve_session() [protocol/auth.py]
-Calls:     (none)
-Purpose:   Return credentials from session["credentials"] or None if absent/wrong type.
-```
+### Production/Railway
 
-**`check_session_ttl`**
-```
-File:      auth_app/services.py
-Function:  check_session_ttl(session) -> bool
-Called By: auth_status(), _resolve_session()
-Calls:     time.time()
-Purpose:   Return True if session has exceeded its TTL. With session_ttl_seconds = -1
-           (the value set by auth_login), this always returns False — session never
-           expires from server-side TTL. Only returns True when session_ttl_seconds > 0
-           and time.time() > created_at + ttl_seconds.
+Docker build:
+
+```text
+Dockerfile
+  -> python:3.12-slim
+  -> install requirements
+  -> copy source
+  -> set DJANGO_SETTINGS_MODULE=publive_mcp.settings.prod
+  -> collectstatic
+  -> set CMD to /app/entrypoint.sh
 ```
 
-### What Is Stored in the Session
+Container start:
 
-The session is a Django database-backed session (`SESSION_ENGINE = "django.contrib.sessions.backends.db"`) stored in the `django_session` table.
+```text
+entrypoint.sh
+  -> python manage.py migrate --noinput
+  -> python manage.py showmigrations auth_app
+  -> gunicorn publive_mcp.wsgi -w 1 --threads 4 -b 0.0.0.0:${PORT:-8000}
+```
 
-| Session Key | Type | Value | Set By |
-|-------------|------|-------|--------|
-| `credentials` | dict | `{ publisherId, apiKey, apiSecret }` | `set_session_credentials()` |
-| `authenticatedAt` | str | ISO 8601 datetime | `auth_login()` |
-| `session_created_at` | int | Unix epoch timestamp | `auth_login()` |
-| `session_ttl_seconds` | int | `-1` (never expires) | `auth_login()` |
+WSGI:
 
-### Conditional Check Logic
+```text
+publive_mcp/wsgi.py
+  -> get_wsgi_application()
+  -> newrelic.agent.WSGIApplicationWrapper(...)
+```
 
-| Check | Why | Failure result |
-|-------|-----|----------------|
-| Body is valid JSON | `auth_login` only accepts JSON POST bodies | 400 `{ error: "Invalid request body." }` |
-| All three fields non-empty | Publisher API requires all three for Basic Auth | 400 `{ error: "All fields are required." }` |
-| CDS returns 2xx | Validates credentials are real and accepted by Publive | 401 or 500 depending on CDS status code |
-| `requests.RequestException` caught | CDS unreachable (timeout, DNS failure) | 500 `{ error: "Could not reach Publive API: ..." }` |
+Production setting guard:
+
+```text
+publive_mcp/settings/prod.py
+  -> DEBUG = False
+  -> SESSION_COOKIE_SECURE = True
+  -> refuses to boot if REDIS_URL is missing
+```
+
+Redis is required in production because it backs:
+
+- SSE session registry
+- Per-session SSE message queues
+- Per-session MCP stats
+- Prompt event rate-limit counters
+- Django cache rate limits
 
 ---
 
-## 4. OAuth + PKCE Flow
+## 3. URL Routing
 
-### Phase 1: Client Registration
+Root router:
 
-See [Section 2](#2-complete-user-registration-flow). The client registers once to get a `client_id` and binds a `redirect_uri`.
-
-### Phase 2: Authorization Request (GET /authorize)
-
-The MCP client opens a browser to `GET /authorize` with these query parameters:
-- `response_type=code`
-- `client_id=<registered_id>`
-- `redirect_uri=<registered_or_loopback>`
-- `state=<random_csrf_token_from_client>`
-- `code_challenge=<BASE64URL(SHA256(code_verifier))>`
-- `code_challenge_method=S256`
-
-**`_validate_authorize_request`**
-```
-File:      auth_app/views.py
-Function:  _validate_authorize_request(client_id, redirect_uri, response_type) -> Optional[tuple[str, str]]
-Called By: oauth_authorize() GET and POST paths
-Calls:     OAuthClient.objects.get(), redirect_uris_match()
-Purpose:   Validate response_type (must be "code"), client_id (must exist in DB),
-           redirect_uri (must match registered URI, with loopback any-port exception).
-           Returns (error_code, description) or None.
+```text
+publive_mcp/urls.py
+  path("", include("auth_app.urls"))
+  path("", include("mcp_app.urls"))
 ```
 
-On `GET /authorize` validation passes → render `authorize.html` with the PKCE parameters embedded in hidden form fields.
+This means both `auth_app` and `mcp_app` mount at the site root.
 
-### Phase 3: Credential Submission (POST /authorize)
+### MCP routes
 
-The user fills in `publisherId`, `apiKey`, `apiSecret` in the HTML form.
+File: `mcp_app/urls.py`
 
-**`oauth_authorize` (POST path)**
-```
-File:      auth_app/views.py
-Function:  oauth_authorize(request: HttpRequest) -> HttpResponse
-Called By: Django URL router (POST /authorize or POST /oauth/authorize)
-Calls:     _validate_authorize_request(), validate_cds_credentials(), OAuthCode.objects.create()
-Purpose:   Validate client + redirect, verify Publive credentials, issue a short-lived
-           PKCE authorization code, redirect to client's redirect_uri.
+```text
+GET  /              -> health_check()
+GET  /mcp           -> mcp_endpoint()
+POST /mcp           -> mcp_endpoint()
+POST /mcp/message   -> sse_message()
 ```
 
-Steps:
-1. Extract `client_id`, `publisher_id`, `api_key`, `api_secret`, `redirect_uri`, `state`, `code_challenge`, `code_challenge_method` from POST body
-2. `_validate_authorize_request(client_id, redirect_uri, "code")` — same validation as GET
-3. Check all credential fields non-empty
-4. `validate_cds_credentials(publisher_id, api_key, api_secret)` — live CDS check
-5. `secrets.token_urlsafe(32)` — generate `code` (authorization code)
-6. `OAuthCode.objects.create(code=..., client_id=..., redirect_uri=..., code_challenge=..., credentials={...}, expires_at=now + 10min)`
-7. `redirect(f"{redirect_uri}?code={code}&state={state}")`
+### Auth routes
 
-**What Is Stored in `OAuthCode`**
+File: `auth_app/urls.py`
 
-| Field | Value |
-|-------|-------|
-| `code` | `secrets.token_urlsafe(32)` |
-| `client_id` | From POST body |
-| `redirect_uri` | From POST body |
-| `code_challenge` | `BASE64URL(SHA256(code_verifier))` — provided by client |
-| `credentials` | `{ publisherId, apiKey, apiSecret }` — the verified Publive credentials |
-| `expires_at` | `timezone.now() + timedelta(minutes=10)` |
+```text
+GET  /.well-known/oauth-protected-resource
+GET  /.well-known/oauth-protected-resource/<path>
+GET  /.well-known/oauth-authorization-server
+GET  /.well-known/openid-configuration
 
-**The `code_verifier` is never received by the server at this step.** Only the challenge is stored.
-
-### Phase 4: Token Exchange (POST /token)
-
-The MCP client sends:
-- `grant_type=authorization_code`
-- `code=<received_code>`
-- `code_verifier=<original_random_value_from_step_1>`
-- `redirect_uri=<same_redirect_uri>`
-- `client_id=<client_id>`
-
-**PKCE Verification (in `oauth_token`)**
-
-```python
-# auth_app/views.py:396
-expected: str = base64.urlsafe_b64encode(
-    hashlib.sha256(code_verifier.encode()).digest()
-).rstrip(b"=").decode()
-if expected != auth_code.code_challenge:
-    return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
-```
-
-The server recomputes `SHA256(code_verifier)`, base64url-encodes it, strips padding, and compares to the stored `code_challenge`. This is the core PKCE proof.
-
-### PKCE Flow Summary
-
-```
-Client side (before /authorize):
-  code_verifier = secrets.token_urlsafe(32)         # never sent to server
-  code_challenge = BASE64URL(SHA256(code_verifier))  # sent in GET /authorize
-
-Server side (at POST /authorize):
-  Stores code_challenge in OAuthCode.code_challenge
-
-Client side (at POST /token):
-  Sends code_verifier in token exchange request
-
-Server side (at POST /token, auth_app/views.py:396):
-  Recomputes: BASE64URL(SHA256(code_verifier))
-  Compares to stored OAuthCode.code_challenge
-  Match → proceed; mismatch → 400 invalid_grant
-```
-
-### Where Verifier/Challenge Values Are Stored
-
-| Value | Created By | Stored Where | Retrieved When |
-|-------|-----------|--------------|----------------|
-| `code_verifier` | MCP client (never sent to server) | Client memory only | Sent to server in POST /token |
-| `code_challenge` | MCP client, sent in GET /authorize query params | `OAuthCode.code_challenge` column | POST /token — server reads from OAuthCode row |
-| `code` | Server: `secrets.token_urlsafe(32)` | `OAuthCode.code` column | Client sends in POST /token body |
-
----
-
-## 5. Access Token & Refresh Token Flow
-
-### Token Generation
-
-Both access and refresh tokens are generated with `secrets.token_urlsafe(32)` — this produces 32 bytes from `os.urandom`, base64url-encoded to 43 characters. There is no JWT encoding, no signing, no expiration embedded in the token value itself. Tokens are opaque random strings.
-
-### Token Storage
-
-**`oauth_token` table** — one row per `(client_id, publisher_id)` pair.
-
-| Column | Value |
-|--------|-------|
-| `token` | `secrets.token_urlsafe(32)` — access token |
-| `client_id` | From token exchange request body or OAuthCode |
-| `publisher_id` | `credentials["publisherId"]` from OAuthCode |
-| `refresh_token` | `secrets.token_urlsafe(32)` |
-| `credentials` | `{ apiKey, apiSecret }` — `publisherId` is stored separately in `publisher_id` column |
-| `created_at` | `auto_now_add=True` |
-
-The `publisherId` is **not** stored inside `credentials` JSON on new rows (migration 0013 stripped it from old rows). It is always read from the flat `publisher_id` column.
-
-### Upsert Behaviour
-
-At token exchange, the server checks for an existing token for the same `(client_id, publisher_id)`:
-
-```python
-# auth_app/views.py:422
-existing = OAuthToken.objects.filter(
-    client_id=oauth_client_id,
-    publisher_id=publisher_id,
-).first()
-```
-
-If found → return the **existing** `token` (stable token identity across re-authorizations). The `refresh_token` is backfilled if missing (pre-migration rows).
-
-If not found → create new row with both `token` and `refresh_token`.
-
-This means a publisher re-authorizing the same client always gets the same access token back. There is no forced rotation on re-authorization.
-
-### Token Validation
-
-Validation is lookup-only — there is no signature to verify:
-
-```python
-# mcp_app/protocol/auth.py:57
-oauth_token = OAuthToken.objects.get(token=token_value)
-credentials = {**oauth_token.credentials, "publisherId": oauth_token.publisher_id}
-```
-
-`OAuthToken.DoesNotExist` → token is invalid/unknown → `(None, None, None)` returned → 401.
-
-### Expiration Handling
-
-**Access tokens have no expiration**. There is no `expires_at` column on `OAuthToken` (migration 0009 removed it). Tokens live until explicitly revoked.
-
-**Authorization codes (`OAuthCode`) expire in 10 minutes**:
-```python
-# auth_app/views.py:389
-if auth_code.expires_at < timezone.now():
-    auth_code.delete()
-    return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
-```
-
-### Refresh Token Flow
-
-```
-Client
- → POST /token (grant_type=refresh_token, refresh_token=<old_refresh>)
- → oauth_token() [auth_app/views.py:300]
- → OAuthToken.objects.select_for_update().get(refresh_token=old_value)
- → Atomic swap: existing.refresh_token = new_refresh; existing.save()
- → Return { access_token: existing.token, refresh_token: new_refresh }
-```
-
-Key properties:
-- **Atomic rotation**: `select_for_update()` inside `transaction.atomic()` ensures two simultaneous refresh requests cannot both succeed.
-- **Access token is not rotated**: The existing `access_token` value is reused; only `refresh_token` rotates.
-- **Unknown refresh token**: `OAuthToken.DoesNotExist` → 400 `{ error: "invalid_grant", error_description: "Unknown refresh token" }`
-
-### Token Revocation (RFC 7009)
-
-```
+POST /register
+GET  /authorize
+POST /authorize
+GET  /oauth/authorize
+POST /oauth/authorize
+POST /token
+POST /oauth/token
 POST /revoke
- → oauth_revoke() [auth_app/views.py:637]
- → parse_oauth_token_body()
- → OAuthToken.objects.filter(token=...).delete()   # if hint != "refresh_token"
- → OAuthToken.objects.filter(refresh_token=...).delete()  # fallback
-```
+POST /oauth/revoke
+GET  /userinfo
 
-Both access tokens and refresh tokens are accepted. Hint-driven:
-- `token_type_hint=refresh_token` → try `refresh_token` column first, fall back to `token`
-- Any other / absent hint → try `token` column first, fall back to `refresh_token`
-
-**Always returns HTTP 200** per RFC 7009 §2.2 — the server never reveals whether the token existed.
-
----
-
-## 6. SSE Transport Authentication Flow
-
-### Overview
-
-SSE is the legacy MCP 2024-11-05 transport. A `GET /mcp` opens a long-lived `text/event-stream` response. The client then sends JSON-RPC messages via `POST /mcp/message?sessionId=<uuid>`, and responses are pushed back over the stream.
-
-Authentication happens **once at connection open**. After that, credentials are stored in the in-process `_sse_sessions` dict for the lifetime of the stream.
-
-### Complete Call Chain
-
-```
-MCP Client
- → GET /mcp  (Authorization: Bearer <token> or Session-Cookie)
- → mcp_endpoint()                   [mcp_app/views/__init__.py:17]
- → identify_mcp_client()            [mcp_app/protocol/auth.py:104]
- → resolve_credentials()            [mcp_app/protocol/auth.py:39]
-   → _resolve_oauth_token()         [mcp_app/protocol/auth.py:53]    (Bearer path)
-     → OAuthToken.objects.get()
-     → Database: SELECT FROM oauth_token WHERE token=...
-   OR
-   → _resolve_session()             [mcp_app/protocol/auth.py:70]    (Cookie path)
-     → get_session_credentials()    [auth_app/services.py:22]
-     → check_session_ttl()          [auth_app/services.py:35]
- → sse_open()                       [mcp_app/views/sse.py:7]
- → open_sse_connection()            [mcp_app/transport/sse.py:119]
-   → register_session()             [mcp_app/transport/sse.py:58]
-   → init_stats()                   [mcp_app/protocol/session_store.py:10]
-   → StreamingHttpResponse(event_stream())
-```
-
-### SSE Session Registration
-
-```python
-# mcp_app/transport/sse.py:58
-def register_session(session_id: str, credentials: dict, token_expires_at) -> int:
-    with _sessions_lock:
-        _sse_sessions[session_id] = {
-            "credentials":      credentials or {},
-            "token_expires_at": token_expires_at,
-            "queue":            queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE),
-        }
-        return len(_sse_sessions)
-```
-
-`_sse_sessions` is a module-level `dict` at `mcp_app/transport/sse.py:44`. It is guarded by `_sessions_lock` (a `threading.Lock`). It lives for the duration of the server process (in-memory only; not persisted or shared across processes). The deployment uses `-w 1` (single gunicorn worker) precisely to ensure all SSE sessions land in the same process.
-
-### Event Stream Mechanics
-
-```python
-# mcp_app/transport/sse.py:168
-def event_stream():
-    yield f"event: endpoint\ndata: {post_url}\n\n"   # tell client where to POST
-    try:
-        while True:
-            popped = pop_message(session_id, timeout=25)
-            if popped is None:
-                yield ": keepalive\n\n"               # SSE comment — keeps connection alive
-                continue
-            wait_ms, msg = popped
-            yield f"event: message\ndata: {json.dumps(msg)}\n\n"
-    finally:
-        _close_sse_session(session_id, publisher_id, stream_t0)
-```
-
-The `endpoint` event delivers the URL where the client should POST messages: `{BASE_URL}/mcp/message?sessionId={session_id}`.
-
-### Message Handling (POST /mcp/message)
-
-```
-Client
- → POST /mcp/message?sessionId=<uuid>  (JSON-RPC body)
- → sse_message()                [mcp_app/views/sse.py:14]
- → handle_sse_message()         [mcp_app/transport/sse.py:263]
-   → get_session()              [mcp_app/transport/sse.py:68] — lookup credentials from _sse_sessions
-   → dispatch_jsonrpc()         [mcp_app/protocol/dispatch.py:177]
-   → push_message()             [mcp_app/transport/sse.py:88] — enqueue response
- → Response pushed over SSE stream
- → Return JsonResponse({"ok": True})
-```
-
-`POST /mcp/message` does **not** re-authenticate. It only verifies that a session entry exists for the provided `sessionId`. The credentials resolved at `GET /mcp` are cached in `_sse_sessions[session_id]["credentials"]` and retrieved by `get_session(session_id)`.
-
-If the `sessionId` is unknown: `JsonResponse({"error": "No active MCP session."}, status=400)`.
-
-### Session Lifecycle
-
-| Event | Function | Action |
-|-------|----------|--------|
-| Client connects (`GET /mcp`) | `open_sse_connection()` | `register_session()` adds entry to `_sse_sessions`; `init_stats()` adds entry to `_stats` |
-| Client sends message | `handle_sse_message()` | Looks up `_sse_sessions[session_id]`, dispatches, pushes response to queue |
-| Stream closed (client disconnects, server timeout) | `event_stream()` finally block → `_close_sse_session()` | `close_session()` removes from `_sse_sessions`; `pop_stats()` removes from `_stats`; emits NR events |
-
----
-
-## 7. HTTP Transport Authentication Flow
-
-### Overview
-
-HTTP (Streamable HTTP) is the stateless MCP transport — each `POST /mcp` is fully self-contained. There is no persistent stream. The client must authenticate with every request.
-
-### Complete Call Chain
-
-```
-MCP Client
- → POST /mcp  (Authorization: Bearer <token> or Session-Cookie, Content-Type: application/json)
- → mcp_endpoint()                [mcp_app/views/__init__.py:17]
- → resolve_credentials()         [mcp_app/protocol/auth.py:39]
-   → _resolve_oauth_token() or _resolve_session()
- → http_mcp()                    [mcp_app/views/http.py:11]
-   → Content-Type check (must contain "application/json")
- → handle_http_request()         [mcp_app/transport/http.py:25]
-   → derive_session_id()         [mcp_app/protocol/session.py:17]
-   → json.loads(request.body)
-   → dispatch_jsonrpc()          [mcp_app/protocol/dispatch.py:177]
- → JsonResponse(response)
-```
-
-### Stateless Session Identity
-
-Since HTTP transport has no long-lived connection, sessions are identified pseudo-stably:
-
-```python
-# mcp_app/protocol/session.py:17
-def derive_session_id(request) -> str:
-    key = getattr(request.session, "session_key", None)
-    if key:
-        return key                                           # Django session key (browser users)
-    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[len("Bearer "):]
-        return "oauth-" + hashlib.sha256(token.encode()).hexdigest()[:16]  # stable per-token ID
-    return "anon-" + uuid.uuid4().hex[:8]                   # transient (probe / unauthenticated)
-```
-
-The session ID is used for New Relic telemetry and rate limiting buckets — it does not gate access.
-
-### Batch Request Support
-
-```python
-# mcp_app/transport/http.py:47
-if isinstance(body, list):
-    responses = [
-        r for r in (
-            dispatch_jsonrpc(msg, credentials, request, session_id, token_expires_at)
-            for msg in body
-        )
-        if r is not None
-    ]
-    return JsonResponse(responses, safe=False) if responses else HttpResponse(status=202)
-```
-
-If the request body is a JSON array (batch), each item is dispatched independently with the same `credentials`. Notifications (no `id` field in JSON-RPC) return `None` from `dispatch_jsonrpc` and are filtered out; if all items are notifications, HTTP 202 is returned.
-
-### Content-Type Enforcement
-
-```python
-# mcp_app/views/http.py:13
-content_type = request.META.get("CONTENT_TYPE", "")
-if "application/json" not in content_type:
-    return JsonResponse({...}, status=415)
-```
-
-Requests without `application/json` in `Content-Type` are rejected with HTTP 415 before any dispatch occurs.
-
----
-
-## 8. MCP Client → Server Authentication Flow
-
-### Combined Flow (Entry Point: `mcp_endpoint`)
-
-Both SSE (`GET /mcp`) and HTTP (`POST /mcp`) enter through the same single authenticating view:
-
-```python
-# mcp_app/views/__init__.py:17
-@csrf_exempt
-def mcp_endpoint(request):
-    credentials, token_expires_at, error_code = resolve_credentials(request)
-    if error_code or not credentials:
-        return build_unauthorized_response(request, error_code=error_code)
-    if request.method == "GET":
-        return sse_open(request, credentials, token_expires_at)
-    if request.method == "POST":
-        return http_mcp(request, credentials, token_expires_at)
-    return HttpResponse(status=405)
-```
-
-`resolve_credentials` is the single function responsible for all credential resolution.
-
-### `resolve_credentials` Decision Tree
-
-```python
-# mcp_app/protocol/auth.py:39
-def resolve_credentials(request):
-    auth_header: str = request.META.get("HTTP_AUTHORIZATION", "")
-    if auth_header.startswith("Bearer "):
-        token_value: str = auth_header[len("Bearer "):].strip()
-        return _resolve_oauth_token(token_value)
-    return _resolve_session(request)
-```
-
-**Path 1: Bearer token present**
-1. Strip `"Bearer "` prefix from `Authorization` header
-2. `OAuthToken.objects.get(token=token_value)` — single DB lookup
-3. Build credentials: `{**oauth_token.credentials, "publisherId": oauth_token.publisher_id}`
-4. Return `(credentials, None, None)`
-5. If `DoesNotExist`: return `(None, None, None)` → 401
-
-**Path 2: No Bearer header (session cookie)**
-1. `get_session_credentials(request.session)` — read `session["credentials"]`
-2. If no credentials: return `(None, None, None)` → 401
-3. `check_session_ttl(request.session)` — check server-side deadline
-4. If expired: `request.session.flush()`, return `(None, None, SESSION_EXPIRED)` → 401 with reason
-5. Return `(credentials, None, None)`
-
-### `build_unauthorized_response`
-
-```python
-# mcp_app/protocol/auth.py:85
-def build_unauthorized_response(request, error_code=None) -> JsonResponse:
-    base_url = getattr(settings, "BASE_URL", "http://localhost:8000").rstrip("/")
-    body = {"authUrl": f"{base_url}/connect"}
-    if error_code and error_code in _ERROR_DESCRIPTIONS:
-        body["error"] = error_code
-        body["error_description"] = _ERROR_DESCRIPTIONS[error_code]
-    else:
-        body["error"] = "Not authenticated"
-    resp = JsonResponse(body, status=401)
-    resp["WWW-Authenticate"] = (
-        f'Bearer realm="{base_url}",'
-        f' resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
-    )
-    return resp
-```
-
-The `WWW-Authenticate` header is RFC 6750-compliant and includes the `resource_metadata` URL pointing to the protected-resource discovery document — this is how MCP clients discover the authorization server automatically.
-
-### Full MCP Tool Call Sequence (After Auth)
-
-```
-Client → GET /mcp (Bearer <token>)
-  → mcp_endpoint() → resolve_credentials() → _resolve_oauth_token() → DB
-  → sse_open() → open_sse_connection() → register_session() → SSE stream open
-
-Client ← "event: endpoint\ndata: {BASE_URL}/mcp/message?sessionId=<uuid>"
-
-Client → POST /mcp/message?sessionId=<uuid>  { jsonrpc: "2.0", method: "tools/list", id: 1 }
-  → sse_message() → handle_sse_message()
-  → get_session() → credentials from _sse_sessions
-  → dispatch_jsonrpc(body, credentials, ...)
-  → jsonrpc_ok(1, { tools: [...] })
-  → push_message(session_id, response)
-
-Client ← SSE: "event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[...]}}"
-
-Client → POST /mcp/message?sessionId=<uuid>  { method: "tools/call", params: { name: "fetch_published_posts", arguments: {...} } }
-  → dispatch_jsonrpc() → _handle_tool_call()
-  → _validate_tool_args() → check required fields and types
-  → dispatch_cds_tool(credentials, "fetch_published_posts", args)
-  → cds_get(credentials, "/posts/", params)  [mcp_app/clients/cds.py:47]
-  → requests.get(CDS_URL, headers={"Authorization": "Basic ..."})
-  → push_message(session_id, jsonrpc_ok result)
-
-Client ← SSE: "event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"..."}]}}"
+GET  /connect
+POST /auth/login
+GET  /auth/success
+GET  /auth/status
+POST /auth/logout
 ```
 
 ---
 
-## 9. Database Deep Dive
+## 4. Request Middleware
 
-### Table: `oauth_client`
+Every request passes through the middleware configured in
+`publive_mcp/settings/base.py`.
 
-**Purpose**: Registry of dynamically-registered OAuth 2.0 clients. One row per AI client installation.
+Relevant custom middleware:
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | BigAutoField | PRIMARY KEY, auto-increment | Internal surrogate key |
-| `client_id` | VARCHAR(64) | UNIQUE, NOT NULL, INDEX | Publicly visible client identifier; generated with `secrets.token_urlsafe(24)` |
-| `redirect_uri` | VARCHAR(512) | NOT NULL, DEFAULT `""` | Single registered redirect URI; blank means no URI was provided |
-| `created_at` | DATETIME | NOT NULL, auto-set | Set by `auto_now_add=True` at INSERT time |
+```text
+mcp_app.middleware.RequestIDMiddleware
+  -> reads X-Request-ID or creates a UUID
+  -> stores request.request_id
+  -> echoes X-Request-ID response header
 
-**Relationships**: Referenced by `OAuthCode.client_id` and `OAuthToken.client_id` (logical FK, no DB-level constraint).
+mcp_app.middleware.SecurityHeadersMiddleware
+  -> applies HTML-only security headers:
+     Content-Security-Policy
+     X-Frame-Options
+     X-Content-Type-Options
+     Referrer-Policy
+     Permissions-Policy
 
-**Indexes**: Unique index on `client_id` (from `unique=True` + `db_index=True`).
-
-**When records are created**: `oauth_register()` — `auth_app/views.py:109`
-**When records are updated**: Never — client registrations are immutable.
-**When records are deleted**: Never (no code path exists to delete clients).
-
----
-
-### Table: `oauth_code`
-
-**Purpose**: Short-lived PKCE authorization codes. Each row represents one in-flight authorization that has not yet been exchanged for a token.
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | BigAutoField | PRIMARY KEY | Internal surrogate key |
-| `code` | VARCHAR(128) | UNIQUE | Authorization code; `secrets.token_urlsafe(32)` |
-| `client_id` | VARCHAR(64) | INDEX | The `client_id` of the registering OAuth client |
-| `redirect_uri` | TEXT | NOT NULL | The `redirect_uri` from the authorization request |
-| `code_challenge` | VARCHAR(256) | NOT NULL | `BASE64URL(SHA256(code_verifier))` — stored for PKCE verification |
-| `credentials` | JSONField | NOT NULL | `{ publisherId, apiKey, apiSecret }` — verified against CDS at issue time |
-| `expires_at` | DATETIME | NOT NULL | `timezone.now() + timedelta(minutes=10)` |
-
-**When records are created**: `oauth_authorize()` POST — `auth_app/views.py:272`
-**When records are updated**: Never — codes are immutable.
-**When records are deleted**: `oauth_token()` — `auth_app/views.py:418` (on successful exchange). Also deleted early if expired check fires at `auth_app/views.py:390`.
-
-**No automatic cleanup of expired, un-exchanged rows**: Rows are only deleted on exchange or explicit expiry check. Periodic garbage collection is not implemented.
-
----
-
-### Table: `oauth_token`
-
-**Purpose**: Long-lived bearer tokens issued after successful PKCE exchange. One row per `(client_id, publisher_id)` pair.
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `id` | BigAutoField | PRIMARY KEY | Internal surrogate key |
-| `token` | VARCHAR(128) | UNIQUE | Access token value; `secrets.token_urlsafe(32)` |
-| `client_id` | VARCHAR(64) | INDEX, BLANK | The OAuth client that was issued this token |
-| `publisher_id` | VARCHAR(64) | INDEX, BLANK | The Publive publisher ID (extracted from credentials at issue time) |
-| `refresh_token` | VARCHAR(128) | UNIQUE, NULL | Refresh token; `secrets.token_urlsafe(32)` |
-| `credentials` | JSONField | NOT NULL | `{ apiKey, apiSecret }` — `publisherId` is in the flat column, not here |
-| `created_at` | DATETIME | NULL | `auto_now_add=True` |
-
-**Relationships**: `client_id` relates to `oauth_client.client_id` (logical).
-
-**Indexes**: Unique index on `token`; unique index on `refresh_token`; index on `client_id`; index on `publisher_id`.
-
-**When records are created**: `oauth_token()` new-token path — `auth_app/views.py:451`
-**When records are updated**: 
-  - `refresh_token` column rotation — `auth_app/views.py:355`
-  - `refresh_token` backfill for old rows — `auth_app/views.py:430`
-**When records are deleted**: `oauth_revoke()` — `auth_app/views.py:661-668`
-
----
-
-### Table: `django_session`
-
-**Purpose**: Django session storage for browser-based auth. Created/managed by `django.contrib.sessions`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `session_key` | VARCHAR(40) | Primary key; random session identifier (set as cookie value) |
-| `session_data` | TEXT | Base64-encoded pickled session dict |
-| `expire_date` | DATETIME | When Django considers this session expired |
-
-**Session dict keys written by this application**:
-
-| Key | Type | Set By |
-|-----|------|--------|
-| `credentials` | dict | `set_session_credentials()` in `auth_app/services.py:30` |
-| `authenticatedAt` | str (ISO 8601) | `auth_login()` in `auth_app/views.py:534` |
-| `session_created_at` | int (Unix epoch) | `auth_login()` in `auth_app/views.py:535` |
-| `session_ttl_seconds` | int (-1) | `auth_login()` in `auth_app/views.py:536` |
-| `mcp_protocol_version` | str | `dispatch_jsonrpc()` on `initialize` method, `mcp_app/protocol/dispatch.py:195` |
-
-**When records are created**: First request after `auth_login()` calls `set_session_credentials()`
-**When records are updated**: `SESSION_SAVE_EVERY_REQUEST = True` — Django updates `expire_date` on every request
-**When records are deleted**: `request.session.flush()` — called by `auth_logout()`, `auth_status()` on expired TTL, `_resolve_session()` on expired TTL
-
----
-
-## 10. Middleware Analysis
-
-The middleware stack is defined in `publive_mcp/settings/base.py:41` and executes in this exact order for every incoming request.
-
-### Execution Order (request phase — top to bottom; response phase — bottom to top)
-
-1. `django.middleware.security.SecurityMiddleware`
-2. `django.contrib.sessions.middleware.SessionMiddleware`
-3. `django.middleware.common.CommonMiddleware`
-4. `whitenoise.middleware.WhiteNoiseMiddleware`
-5. `mcp_app.middleware.RequestIDMiddleware`
-6. `mcp_app.middleware.SecurityHeadersMiddleware`
-7. `mcp_app.middleware.RateLimitMiddleware`
-8. View function
-
----
-
-### `django.middleware.security.SecurityMiddleware`
-
+mcp_app.middleware.RateLimitMiddleware
+  -> applies sliding-window request limits using Django cache/Redis
 ```
-File:              django/middleware/security.py
-Executed Before:   Everything else
-Executed After:    View (response phase)
-Purpose:           HTTPS redirects, HSTS header, secure cookie flag, host validation.
-Failure Conditions: None for auth — purely additive headers.
+
+`django.middleware.csrf.CsrfViewMiddleware` is not configured in
+`publive_mcp/settings/base.py`, so CSRF token validation is not part of the
+current request pipeline. The OAuth machine endpoints that call
+`check_origin()` are `/register` and `/token`; other protection comes from
+endpoint authentication, SameSite session cookies, and rate limits.
+
+Rate-limit rules:
+
+```text
+POST /auth/login  -> 10/min per IP
+POST /register    -> 20/min per IP
+ANY  /authorize   -> 20/min per IP, path-prefix match on the root alias
+POST /token       -> 20/min per IP, path-prefix match on the root alias
+ANY  /mcp         -> 120/min per bearer token prefix, else IP
+```
+
+The rate limiter is prefix-based. The OAuth discovery metadata advertises the
+root `/authorize`, `/token`, and `/revoke` endpoints; `/oauth/authorize`,
+`/oauth/token`, and `/oauth/revoke` are compatibility aliases that enter the
+same views. The current middleware rules match the root paths listed above; the
+`/oauth/*` aliases do not match the `/authorize` or `/token` prefix rules unless
+a future rule is added for those alias paths.
+
+Local development disables rate limiting in `publive_mcp/settings/local.py`:
+
+```text
+RATE_LIMIT_ENABLED = False
 ```
 
 ---
 
-### `django.contrib.sessions.middleware.SessionMiddleware`
+## 5. Authentication Architecture
 
-```
-File:              django/contrib/sessions/middleware.py
-Executed Before:   All custom middleware and views
-Executed After:    View (persists session changes in response phase)
-Purpose:           Attaches request.session backed by django_session table.
-                   On response: saves session to DB if SESSION_SAVE_EVERY_REQUEST=True.
-Failure Conditions: If DB is unavailable, session reads raise OperationalError.
-```
+There are two authentication paths, but both end with the same credential shape:
 
-`request.session` is available to all views and middleware below this layer. This middleware is what makes `auth_login()`, `_resolve_session()`, and `get_session_credentials()` work.
-
----
-
-### `django.middleware.common.CommonMiddleware`
-
-```
-File:              django/middleware/common.py
-Executed Before:   Custom middleware
-Executed After:    View
-Purpose:           URL normalization (trailing slash appending), ALLOWED_HOSTS check.
-Failure Conditions: 404 if APPEND_SLASH enabled and path can't be resolved; blocked if host not in ALLOWED_HOSTS (set to "*" here, so never blocks).
-```
-
----
-
-### `whitenoise.middleware.WhiteNoiseMiddleware`
-
-```
-File:              whitenoise/middleware.py
-Executed Before:   RequestIDMiddleware
-Executed After:    View
-Purpose:           Serve static files directly from Python process (no nginx needed).
-Failure Conditions: None affecting auth.
-```
-
----
-
-### `mcp_app.middleware.RequestIDMiddleware`
-
-```
-File:              mcp_app/middleware.py:99
-Middleware:        RequestIDMiddleware
-Executed Before:   SecurityHeadersMiddleware, RateLimitMiddleware, views
-Executed After:    View (adds X-Request-ID to response)
-Purpose:           Attach a request-scoped UUID (or echo X-Request-ID from client).
-                   Stored on request.request_id; echoed back in X-Request-ID header.
-                   Used for log correlation across services.
-Failure Conditions: None — never blocks a request.
-```
-
----
-
-### `mcp_app.middleware.SecurityHeadersMiddleware`
-
-```
-File:              mcp_app/middleware.py:118
-Middleware:        SecurityHeadersMiddleware
-Executed Before:   RateLimitMiddleware, views
-Executed After:    View (adds headers to response)
-Purpose:           Add CSP, X-Frame-Options: DENY, X-Content-Type-Options: nosniff,
-                   Referrer-Policy, Permissions-Policy to all text/html responses.
-                   JSON API responses are unaffected (condition: "text/html" in Content-Type).
-Failure Conditions: None — never blocks a request.
-```
-
-Headers added to HTML responses:
-- `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';`
-- `X-Frame-Options: DENY`
-- `X-Content-Type-Options: nosniff`
-- `Referrer-Policy: strict-origin-when-cross-origin`
-- `Permissions-Policy: geolocation=(), camera=(), microphone=()`
-
----
-
-### `mcp_app.middleware.RateLimitMiddleware`
-
-```
-File:              mcp_app/middleware.py:44
-Middleware:        RateLimitMiddleware
-Executed Before:   Views
-Executed After:    View (response phase is transparent — no modifications)
-Purpose:           Sliding-window rate limits on auth and MCP endpoints. Uses Django cache
-                   (LocMemCache in dev, Redis in prod) keyed by path prefix + identifier + time slot.
-Failure Conditions: Returns 429 with Retry-After header when limit exceeded.
-                    Cache backend errors → fail open (request proceeds).
-```
-
-Rate limit rules (first matching rule applies):
-
-| Path Prefix | Method | Limit | Window | Identifier Strategy |
-|-------------|--------|-------|--------|---------------------|
-| `/auth/login` | POST | 10 req | 60 s | IP (`X-Forwarded-For` → `REMOTE_ADDR`) |
-| `/register` | POST | 20 req | 60 s | IP |
-| `/authorize` | any | 20 req | 60 s | IP |
-| `/token` | POST | 20 req | 60 s | IP |
-| `/mcp` | any | 300 req | 60 s | Token prefix (first 12 chars of Bearer token value) |
-
-Cache key format: `rl:{path_prefix}:{identifier}:{time_slot}` where `time_slot = int(time.time()) // window`.
-
-The MCP endpoint uses `"token"` strategy to avoid penalizing multiple IP-sharing clients behind the same NAT while still protecting against token-level abuse.
-
----
-
-## 11. Authorization Logic
-
-### Protected Routes
-
-Every route under `/mcp` requires authentication. There is no middleware-level auth guard — the check is performed inside the view itself:
-
-```python
-# mcp_app/views/__init__.py:29
-credentials, token_expires_at, error_code = resolve_credentials(request)
-if error_code or not credentials:
-    return build_unauthorized_response(request, error_code=error_code)
-```
-
-All routes under `/auth/*` and `/oauth/*` are public by design — they are the auth endpoints themselves. `GET /connect` renders the login page (public). `GET /auth/status` reads a session (returns `{ authenticated: False }` if none, never 401).
-
-The `GET /` health check (`health_check` view) has no auth check — it returns `{ status: "ok" }` unconditionally.
-
-### Permission Model
-
-There are no roles, scopes, or per-resource permission checks beyond the authentication gate. Once credentials are resolved:
-- **Any authenticated caller can invoke any of the 61 tools**.
-- The only per-session limit is the CMS write-op rate cap (100 ops per bucket per session) enforced in `dispatch.py:312`.
-
-The `publisher_id` embedded in credentials implicitly scopes all downstream API calls — a client authenticated as publisher A cannot access publisher B's data because the Publive CDS/CMS API uses Basic Auth tied to that specific publisher's `apiKey:apiSecret`.
-
-### Scope Validation
-
-Scopes (`read`, `write`) are **advertised** in the discovery document but **not enforced** by this server:
-```python
-# auth_app/views.py:65
-"scopes_supported": ["read", "write"],
-```
-No scope field is stored on `OAuthToken` and no scope check occurs before tool dispatch.
-
-### User Validation at Tool Call Time
-
-The only per-call validation that happens after auth:
-
-1. **Tool exists**: If `name` not in `CMS_TOOL_NAMES` and not in CDS `TOOLS`, `dispatch_cds_tool` is called and will return an error from the handler lookup.
-2. **Tool arguments**: `_validate_tool_args(name, args)` — checks required fields, types, minLength constraints against the tool's `inputSchema`.
-3. **CMS write rate limit**: `increment(session_id, counter_key)` — rejects after 100 ops per bucket.
-
----
-
-## 12. Session Management
-
-### Two Session Subsystems
-
-This project has two independent session concepts:
-
-| Session Type | Storage | Lifecycle | Used For |
-|--------------|---------|-----------|----------|
-| **Django DB Session** | `django_session` table | Until explicit logout or cache flush | Browser-based auth credentials |
-| **SSE In-Process Session** | `_sse_sessions` dict in `mcp_app/transport/sse.py` | Duration of SSE stream connection | SSE transport: credentials + message queue |
-
----
-
-### Django DB Session
-
-**Creation**: `auth_login()` writes credentials and metadata into `request.session`. Django creates a `django_session` row when the session is first saved (via `SessionMiddleware` response phase).
-
-**Cookie settings** (`publive_mcp/settings/base.py`):
-
-| Setting | Value | Effect |
-|---------|-------|--------|
-| `SESSION_ENGINE` | `django.contrib.sessions.backends.db` | Sessions stored in DB |
-| `SESSION_COOKIE_AGE` | `10 * 356 * 24 * 3600` (~10 years) | Max cookie lifetime |
-| `SESSION_COOKIE_HTTPONLY` | `True` | Cookie inaccessible to JavaScript |
-| `SESSION_COOKIE_SAMESITE` | `"Lax"` | CSRF protection; allows top-level GET navigations |
-| `SESSION_SAVE_EVERY_REQUEST` | `True` | Resets cookie expiry on every request |
-
-**TTL Enforcement**: `session_ttl_seconds = -1` means the server-side TTL check (`check_session_ttl`) always returns `False` — sessions last until explicitly terminated. The 10-year cookie ceiling is the only expiry. There is no rolling window TTL on session-based auth.
-
-**Expiration / Cleanup**:
-- Explicit logout: `auth_logout()` → `request.session.flush()` → DB row deleted
-- Expired TTL (when `session_ttl_seconds > 0`): `auth_status()` or `_resolve_session()` detect expiry → `request.session.flush()`
-
-**Session Lookup**:
-```python
-# auth_app/services.py:22
-def get_session_credentials(session) -> Optional[dict]:
-    raw = session.get("credentials")
-    if isinstance(raw, dict):
-        return raw
-    return None
-```
-
----
-
-### SSE In-Process Session
-
-**Creation**: `register_session(session_id, credentials, token_expires_at)` in `mcp_app/transport/sse.py:58` — called by `open_sse_connection()`.
-
-**Structure**:
-```python
-_sse_sessions[session_id] = {
-    "credentials":      { publisherId, apiKey, apiSecret },
-    "token_expires_at": None,   # tokens don't expire currently
-    "queue":            queue.Queue(maxsize=100),
+```json
+{
+  "publisherId": "...",
+  "apiKey": "...",
+  "apiSecret": "..."
 }
 ```
 
-**Session ID**: `str(uuid.uuid4())` — generated fresh for each `GET /mcp` connection at `open_sse_connection():121`.
+Those credentials are later used by CDS/CMS clients to call Publive with Basic
+Auth.
 
-**Cleanup**: `close_session(session_id)` in `sse.py:76` — called from `event_stream()` finally block when the stream closes (client disconnect, gunicorn timeout, server shutdown).
+### Auth path A: OAuth 2.0 + PKCE
 
-**Telemetry State** (separate from session entry): `init_stats()` in `mcp_app/protocol/session_store.py:10` — stored in a parallel `_stats` dict, cleaned up by `pop_stats()` at `_close_sse_session()`.
+Used by desktop/API clients.
+
+Important functions:
+
+```text
+oauth_register()       auth_app/views.py
+oauth_authorize()      auth_app/views.py
+oauth_token()          auth_app/views.py
+oauth_revoke()         auth_app/views.py
+oauth_userinfo()       auth_app/views.py
+validate_cds_credentials() auth_app/services.py
+```
+
+Database models:
+
+```text
+OAuthClient            auth_app/models.py
+OAuthCode              auth_app/models.py
+OAuthToken             auth_app/models.py
+```
+
+### Auth path B: browser session login
+
+Used by users visiting `/connect`.
+
+Important functions:
+
+```text
+connect()              auth_app/views.py
+auth_login()           auth_app/views.py
+auth_success()         auth_app/views.py
+auth_status()          auth_app/views.py
+auth_logout()          auth_app/views.py
+set_session_credentials() auth_app/services.py
+get_session_credentials() auth_app/services.py
+check_session_ttl()    auth_app/services.py
+```
+
+Session credentials are stored in the Django session.
 
 ---
 
-### Session Persistence Across Restarts
+## 6. OAuth PKCE Flow
 
-- Django DB sessions survive gunicorn restarts (stored in Postgres on Railway, SQLite in development).
-- SSE in-process sessions do **not** survive restarts. Any open SSE stream is terminated when the process restarts, and the client must reconnect and re-authenticate.
+This is the flow used by MCP clients that want a bearer token.
+
+### Step 1: OAuth metadata discovery
+
+Request:
+
+```text
+GET /.well-known/oauth-authorization-server
+```
+
+Function:
+
+```text
+oauth_server_metadata()
+```
+
+Returns URLs for:
+
+```text
+issuer
+authorization_endpoint
+token_endpoint
+revocation_endpoint
+registration_endpoint
+userinfo_endpoint
+response_types_supported = ["code"]
+grant_types_supported = ["authorization_code", "refresh_token"]
+code_challenge_methods_supported = ["S256"]
+token_endpoint_auth_methods_supported = ["none"]
+revocation_endpoint_auth_methods_supported = ["none"]
+scopes_supported = ["read", "write"]
+```
+
+Protected resource metadata:
+
+```text
+GET /.well-known/oauth-protected-resource
+  -> oauth_protected_resource()
+  -> returns resource: <BASE_URL>/mcp
+```
+
+### Step 2: Dynamic client registration
+
+Request:
+
+```text
+POST /register
+```
+
+Function chain:
+
+```text
+oauth_register()
+  -> check_origin()
+  -> parse JSON body
+  -> is_registrable_redirect_uri()
+  -> OAuthClient.objects.create()
+  -> return client_id
+```
+
+What it stores:
+
+```text
+oauth_client.client_id
+oauth_client.redirect_uri
+oauth_client.created_at
+```
+
+Redirect URI rules:
+
+- `https://...` is allowed.
+- `http://localhost:<port>/...` is allowed.
+- `http://127.0.0.1:<port>/...` is allowed.
+- `http://[::1]:<port>/...` is allowed.
+- Plain HTTP to non-loopback hosts is rejected.
+
+At authorization time, the requested `redirect_uri` must match the registered
+URI exactly. Loopback redirect URIs are the exception: they may differ by port
+as long as scheme, host, and path match, which is required for native apps that
+bind an ephemeral local port.
+
+### Step 3: Open authorize page
+
+Request:
+
+```text
+GET /authorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256&state=...
+```
+
+Function chain:
+
+```text
+oauth_authorize()
+  -> _validate_authorize_request()
+  -> OAuthClient.objects.get()
+  -> redirect_uris_match()
+  -> render authorize.html
+```
+
+If the client id is unknown, the server may auto-register it when the redirect
+URI is acceptable. This helps desktop clients recover after DB wipes or cached
+client IDs.
+
+Only `response_type=code` is accepted. Implicit-style response types such as
+`token` or `id_token token` are rejected.
+
+### Step 4: User submits Publive credentials
+
+Request:
+
+```text
+POST /authorize
+```
+
+Submitted form fields:
+
+```text
+publisherId
+apiKey
+apiSecret
+client_id
+redirect_uri
+state
+code_challenge
+code_challenge_method
+```
+
+Function chain:
+
+```text
+oauth_authorize()
+  -> _validate_authorize_request()
+  -> validate_cds_credentials()
+  -> OAuthCode.objects.create()
+  -> redirect to redirect_uri?code=...&state=...
+```
+
+Credential validation:
+
+```text
+validate_cds_credentials()
+  -> builds Basic Auth header from apiKey:apiSecret
+  -> GET <CDS_BASE_URL>/posts/?limit=1
+  -> returns true only for 2xx
+```
+
+The authorization code:
+
+- Is random.
+- Is single-use.
+- Expires in 10 minutes.
+- Stores the PKCE `code_challenge`.
+- Temporarily stores Publive credentials until token exchange.
+
+### Step 5: Exchange code for token
+
+Request:
+
+```text
+POST /token
+Content-Type: application/json
+or application/x-www-form-urlencoded
+```
+
+Body:
+
+```json
+{
+  "grant_type": "authorization_code",
+  "code": "...",
+  "code_verifier": "...",
+  "client_id": "...",
+  "redirect_uri": "..."
+}
+```
+
+Function chain:
+
+```text
+oauth_token()
+  -> parse_oauth_token_body()
+  -> check_origin()
+  -> reject implicit or unsupported grant types
+  -> OAuthCode.objects.get()
+  -> verify code expiry
+  -> verify PKCE:
+       expected = BASE64URL(SHA256(code_verifier))
+       expected must equal stored code_challenge
+  -> verify redirect_uri
+  -> auth_code.delete()
+  -> OAuthToken.objects.filter(client_id, publisher_id).first()
+  -> reuse existing token or create new OAuthToken
+  -> return access_token and refresh_token
+```
+
+The access token is long-lived until revoked or replaced. The code stores
+`publisher_id` as a flat column and stores the remaining credentials JSON
+without `publisherId`; `resolve_credentials()` merges it back later.
+
+Token responses intentionally do not include `expires_in`, because OAuth access
+tokens currently do not expire. `token_expires_at` is therefore always `None`
+in MCP transport/session code today.
+
+### Step 6: Refresh token
+
+Request:
+
+```text
+POST /token
+```
+
+Body:
+
+```json
+{
+  "grant_type": "refresh_token",
+  "refresh_token": "..."
+}
+```
+
+Function chain:
+
+```text
+oauth_token()
+  -> transaction.atomic()
+  -> OAuthToken.objects.select_for_update().get(refresh_token=...)
+  -> keep existing access_token
+  -> rotate refresh_token
+  -> return same access_token and new refresh_token
+```
+
+Refresh token rotation uses a row lock so two simultaneous refresh requests do
+not both succeed with the same old refresh token.
+
+### Step 7: Revoke token
+
+Request:
+
+```text
+POST /revoke
+```
+
+Function chain:
+
+```text
+oauth_revoke()
+  -> parse_oauth_token_body()
+  -> delete OAuthToken by access token or refresh token
+  -> always return {}
+```
+
+It returns HTTP 200 even if the token did not exist, following OAuth revocation
+behavior.
+
+### Step 8: UserInfo
+
+Request:
+
+```text
+GET /userinfo
+Authorization: Bearer <token>
+```
+
+Function chain:
+
+```text
+oauth_userinfo()
+  -> resolve_credentials()
+  -> if unauthenticated, build_unauthorized_response()
+  -> return sub and publisher_id
+```
+
+`/userinfo` also works with a valid browser session cookie. The `sub` claim is
+the Publive `publisherId`, because this server delegates publisher-level
+Publive API credentials rather than individual user identities.
 
 ---
 
-## 13. Error Handling Paths
+## 7. Browser Session Login Flow
 
-### Invalid Credentials (Login)
+This flow is for users using the web auth UI.
 
-**Trigger**: `validate_cds_credentials()` returns `(False, 401)` or `(False, 403)`
+### Step 1: Open connect page
 
-**Path**:
-```
-auth_login() [views.py:550]
- → status_code in (401, 403)
- → JsonResponse({"error": "Invalid credentials."}, status=401)
-```
-New Relic: `auth.result=failure`, `auth.failure_reason=cds_auth_failed`, metric `Custom/Auth/auth_failure_count`.
+Request:
 
----
-
-### Invalid Credentials (OAuth Authorize POST)
-
-**Trigger**: `validate_cds_credentials()` returns `(False, N)` in `oauth_authorize()`
-
-**Path**:
-```
-oauth_authorize() [views.py:261]
- → ctx["error"] = f"Invalid credentials (HTTP {status_code})..."
- → render(request, "authorize.html", ctx)  # re-show form with error message
+```text
+GET /connect
 ```
 
----
+Function:
 
-### Invalid PKCE Verifier
-
-**Trigger**: `BASE64URL(SHA256(code_verifier)) != auth_code.code_challenge` at token exchange
-
-**Path**:
-```
-oauth_token() [views.py:396]
- → expected = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
- → expected != auth_code.code_challenge
- → JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
-```
-New Relic: `auth.failure_reason=invalid_pkce`.
-
----
-
-### Expired Authorization Code
-
-**Trigger**: `auth_code.expires_at < timezone.now()` at token exchange
-
-**Path**:
-```
-oauth_token() [views.py:389]
- → auth_code.delete()  # remove expired code
- → JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
+```text
+connect()
+  -> render connect.html
 ```
 
----
+### Step 2: Submit login
 
-### Unknown/Invalid Access Token
+Request:
 
-**Trigger**: `Authorization: Bearer <value>` where value is not in `oauth_token.token`
-
-**Path**:
-```
-mcp_endpoint() [views/__init__.py:29]
- → resolve_credentials() [protocol/auth.py:39]
- → _resolve_oauth_token(token_value) [protocol/auth.py:53]
- → OAuthToken.objects.get(token=token_value)  → DoesNotExist
- → return None, None, None
- → mcp_endpoint(): credentials is None
- → build_unauthorized_response(request, error_code=None)
- → JsonResponse({"error": "Not authenticated", "authUrl": "..."}, status=401)
- → WWW-Authenticate: Bearer realm="...", resource_metadata="..."
+```text
+POST /auth/login
 ```
 
----
+Body:
 
-### Missing Token / Unauthenticated Request
-
-**Trigger**: No `Authorization` header and no valid session cookie
-
-**Path**:
-```
-mcp_endpoint() [views/__init__.py:29]
- → resolve_credentials()
- → _resolve_session(): get_session_credentials(session) returns None
- → return None, None, None
- → build_unauthorized_response(request, error_code=None)
- → 401 with authUrl
+```json
+{
+  "publisherId": "...",
+  "apiKey": "...",
+  "apiSecret": "..."
+}
 ```
 
----
+Function chain:
 
-### Expired Session
-
-**Trigger**: Session TTL check fires — `check_session_ttl()` returns True (only when `session_ttl_seconds > 0`)
-
-**Path via MCP endpoint**:
-```
-_resolve_session() [protocol/auth.py:77]
- → check_session_ttl(request.session) → True
- → request.session.flush()
- → return None, None, SESSION_EXPIRED
- → build_unauthorized_response(request, "SESSION_EXPIRED")
- → JsonResponse({
-       "error": "SESSION_EXPIRED",
-       "error_description": "Your session has expired. Please log in again.",
-       "authUrl": "..."
-   }, status=401)
+```text
+auth_login()
+  -> parse JSON
+  -> validate required fields
+  -> validate_cds_credentials()
+  -> set_session_credentials()
+  -> set authenticatedAt
+  -> set session_created_at
+  -> set session_ttl_seconds = -1
+  -> request.session.set_expiry(10 years)
+  -> return { "success": true, "redirectTo": "/auth/success" }
 ```
 
-**Path via auth_status endpoint**:
-```
-auth_status() [views.py:575]
- → check_session_ttl(request.session) → True
- → request.session.flush()
- → JsonResponse({"authenticated": False, "error": "SESSION_EXPIRED"})
-```
+`session_ttl_seconds = -1` means the session does not self-expire. It ends by
+explicit logout or by server/session storage deletion.
 
----
+### Step 3: Success page
 
-### Unknown Refresh Token
+Request:
 
-**Trigger**: `POST /token` with `grant_type=refresh_token` where `refresh_token` value is not found
-
-**Path**:
-```
-oauth_token() [views.py:337]
- → OAuthToken.objects.select_for_update().get(refresh_token=refresh_val)  → DoesNotExist
- → JsonResponse({"error": "invalid_grant", "error_description": "Unknown refresh token"}, status=400)
+```text
+GET /auth/success
 ```
 
----
+Function:
 
-### SSE Session Missing
-
-**Trigger**: `POST /mcp/message?sessionId=<id>` where `id` has no entry in `_sse_sessions`
-
-**Path**:
-```
-handle_sse_message() [transport/sse.py:284]
- → get_session(session_id) → None
- → record_event("MCPSessionMissing", ...)
- → JsonResponse({"error": "No active MCP session."}, status=400)
+```text
+auth_success()
+  -> if no credentials, redirect /connect
+  -> otherwise render success.html
 ```
 
----
+### Step 4: Status check
 
-### Rate Limit Exceeded
+Request:
 
-**Trigger**: Counter for `rl:{path}:{ident}:{slot}` cache key reaches the limit
-
-**Path**:
-```
-RateLimitMiddleware.__call__() [middleware.py:68]
- → count >= limit
- → JsonResponse({
-       "error": "rate_limit_exceeded",
-       "error_description": "Too many requests. Limit: N per Ms. Retry after Ns.",
-       "retry_after": N
-   }, status=429)
- → Retry-After: N header
+```text
+GET /auth/status
 ```
 
----
+Function chain:
 
-### CDS Unreachable During Auth
-
-**Trigger**: `validate_cds_credentials()` raises `requests.RequestException`
-
-**Path (auth_login)**:
-```
-auth_login() [views.py:519]
- → validate_cds_credentials() raises requests.RequestException
- → JsonResponse({"error": f"Could not reach Publive API: {exc}"}, status=500)
+```text
+auth_status()
+  -> get_session_credentials()
+  -> check_session_ttl()
+  -> return authenticated state and publisherId
 ```
 
-**Path (oauth_authorize POST)**:
-```
-oauth_authorize() [views.py:251]
- → validate_cds_credentials() raises requests.RequestException
- → ctx["error"] = f"Could not reach Publive API: {exc}"
- → render(request, "authorize.html", ctx)
-```
+Authenticated response:
 
----
-
-### Database Failure
-
-**Trigger**: Any DB operation raises an unhandled exception (e.g. connection lost)
-
-**Path**: All `oauth_register`, `oauth_authorize`, `oauth_token`, `auth_login` wrap their main logic in `try/except Exception`, call `notice_err(exc, ...)` to report to New Relic, then **re-raise**. Django's exception handler converts this to HTTP 500.
-
----
-
-## 14. Complete Sequence Diagrams
-
-### Registration Flow
-
-```mermaid
-sequenceDiagram
-    participant C as MCP Client
-    participant S as Server (auth_app/views.py)
-    participant DB as oauth_client table
-
-    C->>S: POST /register\n{ redirect_uri: "https://example.com/cb" }
-    S->>S: check_origin(request)
-    S->>S: is_registrable_redirect_uri(redirect_uri)
-    S->>S: client_id = secrets.token_urlsafe(24)
-    S->>DB: INSERT INTO oauth_client\n(client_id, redirect_uri)
-    DB-->>S: saved
-    S-->>C: 201 { client_id, client_id_issued_at, redirect_uris }
+```json
+{
+  "authenticated": true,
+  "publisherId": "...",
+  "authenticatedAt": "...",
+  "session_expires_in_seconds": null
+}
 ```
 
----
+`session_expires_in_seconds` is `null` for the current never-self-expiring
+session policy. If a finite TTL session is ever configured and has expired,
+`auth_status()` flushes the Django session and returns:
 
-### Login Flow (Session-based)
-
-```mermaid
-sequenceDiagram
-    participant B as Browser
-    participant S as Server (auth_app/views.py)
-    participant CDS as Publive CDS API
-    participant DB as django_session table
-
-    B->>S: POST /auth/login\n{ publisherId, apiKey, apiSecret }
-    S->>S: validate JSON, check all fields non-empty
-    S->>CDS: GET /publisher/{id}/posts/?limit=1\nAuthorization: Basic {base64(key:secret)}
-    CDS-->>S: 200 OK
-    S->>S: set_session_credentials(session, creds)
-    S->>S: session["session_ttl_seconds"] = -1
-    S->>S: session.set_expiry(10 years)
-    S->>DB: UPDATE django_session\n(session_data includes credentials)
-    DB-->>S: saved
-    S-->>B: 200 { success: true, redirectTo: "/auth/success" }
-    Note over B,S: Browser stores session cookie (HttpOnly, SameSite=Lax)
+```json
+{
+  "authenticated": false,
+  "error": "SESSION_EXPIRED"
+}
 ```
 
----
+### Step 5: Logout
 
-### OAuth + PKCE Flow
+Request:
 
-```mermaid
-sequenceDiagram
-    participant C as MCP Client
-    participant B as Browser
-    participant S as Server
-    participant CDS as Publive CDS API
-    participant OC as oauth_code table
-    participant OT as oauth_token table
-
-    C->>C: Generate code_verifier (random)\nCompute code_challenge = BASE64URL(SHA256(verifier))
-    C->>S: POST /register { redirect_uri }
-    S-->>C: { client_id }
-
-    C->>B: Open browser to GET /authorize\n?client_id=...&code_challenge=...&response_type=code
-    B->>S: GET /authorize?...
-    S->>S: _validate_authorize_request(client_id, redirect_uri, "code")
-    S-->>B: 200 HTML authorize.html (form with hidden PKCE params)
-
-    B->>S: POST /authorize\n{ publisherId, apiKey, apiSecret, code_challenge, client_id, redirect_uri }
-    S->>CDS: Validate credentials
-    CDS-->>S: 200 OK
-    S->>S: code = secrets.token_urlsafe(32)
-    S->>OC: INSERT oauth_code\n(code, client_id, redirect_uri, code_challenge, credentials, expires_at)
-    OC-->>S: saved
-    S-->>B: 302 Redirect to redirect_uri?code=...&state=...
-
-    B->>C: Delivers code (via redirect to localhost port)
-    C->>S: POST /token\n{ grant_type=authorization_code, code, code_verifier, redirect_uri, client_id }
-    S->>OC: SELECT * FROM oauth_code WHERE code=...
-    OC-->>S: row (has code_challenge)
-    S->>S: Check expires_at > now()
-    S->>S: Verify: BASE64URL(SHA256(code_verifier)) == code_challenge
-    S->>OC: DELETE oauth_code row
-    S->>OT: SELECT * FROM oauth_token WHERE client_id=... AND publisher_id=... (upsert check)
-    OT-->>S: no existing row
-    S->>S: token = secrets.token_urlsafe(32)\nrefresh = secrets.token_urlsafe(32)
-    S->>OT: INSERT oauth_token\n(token, client_id, publisher_id, refresh_token, credentials)
-    OT-->>S: saved
-    S-->>C: 200 { access_token, token_type: "bearer", refresh_token }
+```text
+POST /auth/logout
 ```
 
----
+Function:
 
-### Token Refresh Flow
-
-```mermaid
-sequenceDiagram
-    participant C as MCP Client
-    participant S as Server (auth_app/views.py)
-    participant OT as oauth_token table
-
-    C->>S: POST /token\n{ grant_type=refresh_token, refresh_token=<old_value> }
-    S->>OT: BEGIN TRANSACTION\nSELECT ... FOR UPDATE WHERE refresh_token=<old_value>
-    OT-->>S: existing row (has token + client_id + publisher_id)
-    S->>S: new_refresh = secrets.token_urlsafe(32)
-    S->>OT: UPDATE oauth_token SET refresh_token=<new_value>
-    OT-->>S: updated
-    S->>OT: COMMIT
-    S-->>C: 200 { access_token: <same existing token>, token_type: "bearer", refresh_token: <new_value> }
-```
-
----
-
-### SSE Authentication Flow
-
-```mermaid
-sequenceDiagram
-    participant C as MCP Client
-    participant EP as mcp_endpoint() [views/__init__.py]
-    participant RC as resolve_credentials() [protocol/auth.py]
-    participant OT as oauth_token table
-    participant SSE as open_sse_connection() [transport/sse.py]
-    participant REG as _sse_sessions dict
-    participant MSG as handle_sse_message() [transport/sse.py]
-
-    C->>EP: GET /mcp\nAuthorization: Bearer <token>
-    EP->>RC: resolve_credentials(request)
-    RC->>OT: SELECT credentials, publisher_id FROM oauth_token WHERE token=...
-    OT-->>RC: row
-    RC-->>EP: (credentials_dict, None, None)
-    EP->>SSE: sse_open(request, credentials, None)
-    SSE->>SSE: session_id = uuid4()
-    SSE->>REG: _sse_sessions[session_id] = { credentials, queue }
-    SSE-->>C: 200 text/event-stream\nevent: endpoint\ndata: {BASE_URL}/mcp/message?sessionId={uuid}
-
-    loop Tool calls
-        C->>MSG: POST /mcp/message?sessionId={uuid}\n{ jsonrpc body }
-        MSG->>REG: get_session(session_id) → credentials
-        MSG->>MSG: dispatch_jsonrpc(body, credentials)
-        MSG->>REG: push_message(session_id, response)
-        MSG-->>C: { ok: true }
-        C-->>C: Receives response via SSE stream
-    end
-
-    C->>C: Disconnects (close connection)
-    SSE->>REG: close_session(session_id) — removes entry
-```
-
----
-
-### HTTP Transport Authentication Flow
-
-```mermaid
-sequenceDiagram
-    participant C as MCP Client
-    participant EP as mcp_endpoint() [views/__init__.py]
-    participant RC as resolve_credentials() [protocol/auth.py]
-    participant OT as oauth_token table
-    participant HTTP as handle_http_request() [transport/http.py]
-    participant DISP as dispatch_jsonrpc() [protocol/dispatch.py]
-
-    C->>EP: POST /mcp\nAuthorization: Bearer <token>\nContent-Type: application/json\n{ jsonrpc body }
-    EP->>RC: resolve_credentials(request)
-    RC->>OT: SELECT ... WHERE token=...
-    OT-->>RC: row
-    RC-->>EP: (credentials, None, None)
-    EP->>HTTP: http_mcp(request, credentials, None)
-    HTTP->>HTTP: Check Content-Type contains "application/json"
-    HTTP->>HTTP: derive_session_id(request) → "oauth-" + sha256(token)[:16]
-    HTTP->>DISP: dispatch_jsonrpc(body, credentials, request, session_id, None)
-    DISP-->>HTTP: response dict
-    HTTP-->>C: JsonResponse(response)
-```
-
----
-
-### MCP Client Authentication Flow (Consolidated)
-
-```mermaid
-sequenceDiagram
-    participant C as MCP Client (Claude Desktop)
-    participant A as Auth Server
-    participant M as MCP Endpoint
-    participant P as Publive CDS/CMS API
-
-    C->>A: GET /.well-known/oauth-authorization-server
-    A-->>C: { authorization_endpoint, token_endpoint, registration_endpoint, ... }
-
-    C->>A: POST /register { redirect_uri: "http://localhost:PORT/cb" }
-    A-->>C: { client_id }
-
-    C->>A: GET /authorize?client_id=...&code_challenge=...&state=...
-    A-->>C: HTML form
-
-    C->>A: POST /authorize { publisherId, apiKey, apiSecret, code_challenge, ... }
-    A->>P: GET /posts/?limit=1 (Basic Auth validation)
-    P-->>A: 200 OK
-    A-->>C: 302 → http://localhost:PORT/cb?code=...&state=...
-
-    C->>A: POST /token { code, code_verifier, ... }
-    A-->>C: { access_token, refresh_token }
-
-    C->>M: GET /mcp\nAuthorization: Bearer <access_token>
-    M->>M: resolve_credentials() → DB lookup → credentials
-    M-->>C: SSE stream open; endpoint URL delivered
-
-    C->>M: POST /mcp/message { method: "tools/call", params: { name: "fetch_published_posts" } }
-    M->>P: GET /publisher/{id}/posts/ (Basic Auth with stored credentials)
-    P-->>M: posts JSON
-    M-->>C: SSE: { jsonrpc result with posts }
+```text
+auth_logout()
+  -> request.session.flush()
+  -> return { "success": true }
 ```
 
 ---
 
-## 15. Source Code Traceability
+## 8. Credential Resolution for MCP Requests
 
-### Registration Flow
+Every main MCP request enters:
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `publive_mcp/urls.py:3` | URL router | Routes `POST /register` to `auth_app.urls` |
-| 2 | `auth_app/urls.py:13` | URL router | Maps `register` path to `views.oauth_register` |
-| 3 | `auth_app/views.py:74` | `oauth_register()` | Main handler: parse body, validate, create client |
-| 4 | `auth_app/services.py:56` | `check_origin()` | Reject disallowed Origin headers |
-| 5 | `auth_app/services.py:111` | `is_registrable_redirect_uri()` | Validate redirect URI is HTTPS or loopback |
-| 6 | `auth_app/services.py:97` | `is_loopback_redirect_uri()` | Check if URI is loopback HTTP |
-| 7 | `auth_app/views.py:106` | `secrets.token_urlsafe(24)` | Generate `client_id` |
-| 8 | `auth_app/views.py:109` | `OAuthClient.objects.create()` | Write to `oauth_client` table |
-| 9 | `auth_app/models.py:5` | `OAuthClient` model | DB row definition |
+```text
+mcp_endpoint()
+```
 
----
+File:
 
-### Session Login Flow
+```text
+mcp_app/views/__init__.py
+```
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `auth_app/urls.py:24` | URL router | Maps `auth/login` to `views.auth_login` |
-| 2 | `auth_app/views.py:495` | `auth_login()` | Parse body, validate, call CDS, create session |
-| 3 | `auth_app/services.py:177` | `validate_cds_credentials()` | Make live HTTP call to CDS to verify creds |
-| 4 | `auth_app/services.py:30` | `set_session_credentials()` | Write credentials to `session["credentials"]` |
-| 5 | `auth_app/views.py:540` | `session.set_expiry()` | Set 10-year cookie ceiling |
-| 6 | `django/contrib/sessions/middleware.py` | `SessionMiddleware` | Persist session to `django_session` on response |
+Function chain:
 
----
+```text
+mcp_endpoint()
+  -> identify_mcp_client()
+  -> resolve_credentials()
+  -> if missing credentials:
+       build_unauthorized_response()
+  -> if GET:
+       sse_open()
+  -> if POST:
+       http_mcp()
+```
 
-### OAuth Authorize Flow
+Credential resolver:
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `auth_app/urls.py:14-15` | URL router | Maps `/authorize` and `/oauth/authorize` to `oauth_authorize` |
-| 2 | `auth_app/views.py:186` | `oauth_authorize()` | GET: render form; POST: validate + issue code |
-| 3 | `auth_app/views.py:157` | `_validate_authorize_request()` | Check response_type, client_id exists, redirect_uri matches |
-| 4 | `auth_app/views.py:170` | `OAuthClient.objects.get()` | Fetch client record from `oauth_client` table |
-| 5 | `auth_app/services.py:129` | `redirect_uris_match()` | Exact match or same-loopback-host any-port |
-| 6 | `auth_app/services.py:177` | `validate_cds_credentials()` | Live CDS credential check |
-| 7 | `auth_app/views.py:271` | `secrets.token_urlsafe(32)` | Generate authorization code |
-| 8 | `auth_app/views.py:272` | `OAuthCode.objects.create()` | Write code + challenge to `oauth_code` table |
-| 9 | `auth_app/views.py:288` | `redirect()` | 302 to `redirect_uri?code=...&state=...` |
+```text
+resolve_credentials()
+  -> if Authorization header starts with "Bearer ":
+       _resolve_oauth_token()
+     else:
+       _resolve_session()
+```
 
----
+Bearer auth takes precedence over a Django session cookie. If a Bearer header is
+present but invalid or unknown, credential resolution returns unauthenticated
+instead of falling back to the session.
 
-### Token Exchange Flow
+Bearer token path:
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `auth_app/urls.py:16-17` | URL router | Maps `/token` and `/oauth/token` to `oauth_token` |
-| 2 | `auth_app/views.py:300` | `oauth_token()` | Parse body, validate, verify PKCE, issue/return token |
-| 3 | `auth_app/services.py:145` | `parse_oauth_token_body()` | Parse JSON or form-urlencoded body |
-| 4 | `auth_app/services.py:56` | `check_origin()` | Validate Origin header |
-| 5 | `auth_app/views.py:382` | `OAuthCode.objects.get()` | Fetch auth code from `oauth_code` table |
-| 6 | `auth_app/views.py:389` | Expiry check | Delete + reject if `expires_at < now()` |
-| 7 | `auth_app/views.py:396` | PKCE verification | `BASE64URL(SHA256(verifier)) == stored challenge` |
-| 8 | `auth_app/views.py:406` | Redirect URI check | Exact match on redirect_uri |
-| 9 | `auth_app/views.py:418` | `auth_code.delete()` | Single-use: delete after exchange |
-| 10 | `auth_app/views.py:422` | `OAuthToken.objects.filter().first()` | Upsert check for existing token |
-| 11 | `auth_app/views.py:448` | `secrets.token_urlsafe(32)` | Generate new token + refresh_token |
-| 12 | `auth_app/views.py:451` | `OAuthToken.objects.create()` | Write token to `oauth_token` table |
+```text
+_resolve_oauth_token()
+  -> OAuthToken.objects.get(token=...)
+  -> credentials = { **oauth_token.credentials, "publisherId": oauth_token.publisher_id }
+  -> return credentials
+```
 
----
+Session cookie path:
 
-### Token Refresh Flow
+```text
+_resolve_session()
+  -> get_session_credentials(request.session)
+  -> check_session_ttl(request.session)
+  -> if expired, flush session and return SESSION_EXPIRED
+  -> return credentials
+```
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `auth_app/views.py:331` | `oauth_token()` refresh_token branch | Handle `grant_type=refresh_token` |
-| 2 | `auth_app/views.py:335` | `transaction.atomic()` | Atomic block prevents race conditions |
-| 3 | `auth_app/views.py:337` | `OAuthToken.objects.select_for_update().get()` | Row-lock the token record |
-| 4 | `auth_app/views.py:354` | `existing.refresh_token = new_refresh` | Rotate refresh token value |
-| 5 | `auth_app/views.py:355` | `existing.save(update_fields=["refresh_token"])` | Write new refresh token to DB |
-| 6 | `auth_app/views.py:365` | `return JsonResponse(...)` | Return same access_token + new refresh_token |
+Unauthorized response:
+
+```text
+build_unauthorized_response()
+  -> HTTP 401
+  -> body includes authUrl: <BASE_URL>/connect
+  -> body includes error "Not authenticated" or typed SESSION_EXPIRED details
+  -> WWW-Authenticate header includes OAuth protected resource metadata URL
+```
 
 ---
 
-### MCP Request Auth Flow
+## 9. MCP Transport: Stateless HTTP
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `mcp_app/middleware.py:44` | `RateLimitMiddleware.__call__()` | Check rate limit before view is reached |
-| 2 | `mcp_app/urls.py:9` | URL router | Maps `mcp` to `mcp_endpoint` |
-| 3 | `mcp_app/views/__init__.py:17` | `mcp_endpoint()` | Single auth gate for all MCP requests |
-| 4 | `mcp_app/protocol/auth.py:39` | `resolve_credentials()` | Dispatch to Bearer or session path |
-| 5a | `mcp_app/protocol/auth.py:53` | `_resolve_oauth_token()` | Bearer: DB lookup of OAuthToken |
-| 5b | `mcp_app/protocol/auth.py:70` | `_resolve_session()` | Cookie: read + TTL-check Django session |
-| 6a | `auth_app/services.py:22` | `get_session_credentials()` | Read `session["credentials"]` |
-| 6b | `auth_app/services.py:35` | `check_session_ttl()` | Enforce server-side deadline |
-| 7 | `mcp_app/protocol/auth.py:85` | `build_unauthorized_response()` | Build RFC 6750 401 response if not authed |
-| 8 | `mcp_app/views/__init__.py:39-43` | `mcp_endpoint()` GET/POST branch | Route to sse_open or http_mcp |
+This is the simpler MCP transport.
+
+Request:
+
+```text
+POST /mcp
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+End-to-end chain:
+
+```text
+Django URL router
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> http_mcp()
+  -> handle_http_request()
+  -> json.loads(request.body)
+  -> dispatch_jsonrpc()
+  -> JsonResponse(response)
+```
+
+Functions:
+
+```text
+http_mcp()
+  -> checks Content-Type contains application/json
+  -> if not JSON, return HTTP 415 unsupported_media_type
+  -> calls handle_http_request()
+
+handle_http_request()
+  -> derives session id:
+       Django session key, or oauth-<sha256 token prefix>, or anon-<uuid>
+  -> records request metrics
+  -> parses JSON
+  -> if invalid JSON, return HTTP 400
+  -> if body is a list:
+       dispatch each JSON-RPC message as a batch
+     else:
+       dispatch one JSON-RPC message
+  -> notification with no id returns HTTP 202
+  -> normal response returns JSON-RPC result
+```
+
+The HTTP transport resolves credentials on every request. It does not store
+credentials in a transport session.
 
 ---
 
-### SSE Session Lifecycle
+## 10. MCP Transport: SSE
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `mcp_app/views/sse.py:7` | `sse_open()` | Thin wrapper, delegates to transport |
-| 2 | `mcp_app/transport/sse.py:119` | `open_sse_connection()` | Generate session UUID, register, start stream |
-| 3 | `mcp_app/transport/sse.py:58` | `register_session()` | Add entry to `_sse_sessions` dict |
-| 4 | `mcp_app/protocol/session_store.py:10` | `init_stats()` | Initialize telemetry counters in `_stats` dict |
-| 5 | `mcp_app/transport/sse.py:168` | `event_stream()` | Generator: yield endpoint event + wait for messages |
-| 6 | `mcp_app/views/sse.py:14` | `sse_message()` | Entry for POST /mcp/message |
-| 7 | `mcp_app/transport/sse.py:263` | `handle_sse_message()` | Lookup session, dispatch, push response |
-| 8 | `mcp_app/transport/sse.py:68` | `get_session()` | Thread-safe credentials lookup from `_sse_sessions` |
-| 9 | `mcp_app/transport/sse.py:88` | `push_message()` | Enqueue response into session queue |
-| 10 | `mcp_app/transport/sse.py:99` | `pop_message()` | Blocking dequeue in event_stream generator |
-| 11 | `mcp_app/transport/sse.py:188` | `_close_sse_session()` | Cleanup + emit summary NR events |
-| 12 | `mcp_app/transport/sse.py:76` | `close_session()` | Remove entry from `_sse_sessions` |
-| 13 | `mcp_app/protocol/session_store.py:76` | `pop_stats()` | Remove + return entry from `_stats` |
+SSE is the stateful/long-lived transport.
+
+### Step 1: Open stream
+
+Request:
+
+```text
+GET /mcp
+Authorization: Bearer <token>
+```
+
+End-to-end chain:
+
+```text
+Django URL router
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> sse_open()
+  -> open_sse_connection()
+```
+
+Inside `open_sse_connection()`:
+
+```text
+open_sse_connection()
+  -> create session_id = uuid4()
+  -> identify publisherId
+  -> register_session(session_id, credentials, token_expires_at)
+  -> enforce MCP_MAX_SSE_SESSIONS admission gate
+  -> init_stats(session_id, session_trace_id)
+  -> return StreamingHttpResponse(event_stream())
+```
+
+If the admission gate is full, the server rolls back the just-registered
+session and returns HTTP 503 with `Retry-After: 30` and
+`error=server_at_capacity`.
+
+First SSE event sent to the client:
+
+```text
+event: endpoint
+data: <BASE_URL>/mcp/message?sessionId=<session_id>
+```
+
+Then the stream waits for queued messages:
+
+```text
+event_stream()
+  -> pop_message(session_id, timeout=25)
+  -> if no message, yield keepalive
+  -> if message exists, yield event: message
+```
+
+### Step 2: Client sends JSON-RPC message
+
+Request:
+
+```text
+POST /mcp/message?sessionId=<session_id>
+Content-Type: application/json
+```
+
+End-to-end chain:
+
+```text
+Django URL router
+  -> sse_message()
+  -> handle_sse_message()
+  -> get_session(session_id)
+  -> json.loads(request.body)
+  -> dispatch_jsonrpc()
+  -> push_message(session_id, response_msg)
+  -> return { "ok": true }
+```
+
+The actual JSON-RPC response is not returned directly from `/mcp/message`.
+Instead it is pushed into the Redis queue and delivered over the still-open SSE
+stream.
+
+`POST /mcp/message` does not run `resolve_credentials()` again. The opaque
+`sessionId` from the initial authenticated `GET /mcp` is the lookup key for the
+Redis session entry that contains credentials. Because this POST usually has no
+Bearer token, the `/mcp` rate-limit rule falls back to the client IP for SSE
+message posts.
+
+### Step 3: Close stream
+
+When the client disconnects:
+
+```text
+event_stream() finally block
+  -> _close_sse_session()
+  -> close_session(session_id)
+  -> delete_queue(session_id)
+  -> pop_stats(session_id)
+  -> emit New Relic session summary events
+```
+
+### Redis objects used by SSE
+
+```text
+mcp:session:<session_id>
+  -> credentials and token_expires_at
+
+mcp:active_sessions
+  -> Redis set of active session IDs
+
+mcp:session_queue:<session_id>
+  -> Redis list of pending JSON-RPC responses
+
+mcp:session_stats:<session_id>
+  -> Redis hash for counters and timings
+
+mcp:session_stats:<session_id>:tool_sequence
+  -> Redis list of tool names executed in the session
+```
+
+The Redis session, queue, and stats keys have a 24 hour safety-net TTL. Session
+and stats TTLs refresh while the session is active; close cleanup still deletes
+the keys immediately on normal disconnect.
 
 ---
 
-### Tool Dispatch Flow (Post-Auth)
+## 11. JSON-RPC Dispatch
 
-| Step | File | Function | Purpose |
-|------|------|----------|---------|
-| 1 | `mcp_app/protocol/dispatch.py:177` | `dispatch_jsonrpc()` | Route JSON-RPC method to handler |
-| 2 | `mcp_app/protocol/dispatch.py:242` | `_handle_tool_call()` | Execute a tools/call request |
-| 3 | `mcp_app/protocol/dispatch.py:49` | `_validate_tool_args()` | Validate required fields and types against inputSchema |
-| 4 | `mcp_app/protocol/dispatch.py:326` | `dispatch_cms_tool()` / `dispatch_cds_tool()` | Route to CMS or CDS handler |
-| 5 | `mcp_app/clients/cds.py:47` | `cds_get()` | HTTP GET to Publive CDS API with Basic Auth |
-| 6 | `mcp_app/clients/shared.py:19` | `build_basic_auth_headers()` | Build `Authorization: Basic base64(key:secret)` |
-| 7 | `mcp_app/clients/shared.py:11` | `build_base_url()` | Format URL with `publisher_id` from credentials |
+All MCP messages eventually enter:
+
+```text
+dispatch_jsonrpc()
+```
+
+File:
+
+```text
+mcp_app/protocol/dispatch.py
+```
+
+Input:
+
+```python
+dispatch_jsonrpc(body, credentials, request, session_id, token_expires_at)
+```
+
+Supported methods:
+
+```text
+initialize
+tools/list
+tools/call
+ping
+```
+
+Known but intentionally unimplemented methods return JSON-RPC `-32601`:
+
+```text
+sampling/createMessage
+roots/list
+resources/list
+resources/read
+resources/subscribe
+resources/unsubscribe
+prompts/list
+prompts/get
+completion/complete
+logging/setLevel
+```
+
+### initialize
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize"
+}
+```
+
+Function path:
+
+```text
+dispatch_jsonrpc()
+  -> method == "initialize"
+  -> save mcp_protocol_version in Django session when request exists
+  -> return protocolVersion, capabilities, serverInfo
+```
+
+Response includes:
+
+```json
+{
+  "protocolVersion": "2024-11-05",
+  "capabilities": { "tools": {} },
+  "serverInfo": { "name": "publive-cds", "version": "1.0.0" }
+}
+```
+
+### tools/list
+
+Function path:
+
+```text
+dispatch_jsonrpc()
+  -> method == "tools/list"
+  -> all_tools = TOOLS + CMS_TOOLS
+  -> return schemas
+```
+
+`TOOLS` comes from `mcp_app.cds`.
+`CMS_TOOLS` comes from `mcp_app.cms`.
+
+### tools/call
+
+Function path:
+
+```text
+dispatch_jsonrpc()
+  -> method == "tools/call"
+  -> _handle_tool_call()
+```
+
+Inside `_handle_tool_call()`:
+
+```text
+_handle_tool_call()
+  -> read params.name
+  -> extract prompt metadata with extract_prompt_for_tool_call()
+  -> validate args against inputSchema
+  -> record prompt observability or drop if rate-limited
+  -> if CMS write, increment per-session write bucket
+  -> dispatch to CMS or CDS:
+       if name in CMS_TOOL_NAMES:
+         dispatch_cms_tool(credentials, name, args)
+       else:
+         dispatch_cds_tool(credentials, name, args)
+  -> record success/degraded/error metrics
+  -> return JSON-RPC result content
+```
+
+Validation uses the tool's `inputSchema`:
+
+```text
+_validate_tool_args()
+  -> checks required fields
+  -> checks basic JSON types
+  -> checks minLength for strings
+  -> tolerates extra fields
+```
+
+CMS write rate limits:
+
+```text
+create/register/add/submit tools:
+  -> create_op_count bucket
+  -> 100 per SSE session
+
+update/delete tools:
+  -> update_delete_op_count bucket
+  -> 100 per SSE session
+```
+
+For stateless HTTP, no Redis stats entry exists, so the per-session SSE write
+counter no-ops.
+
+---
+
+## 12. Tool Registry and Dispatch
+
+### CDS tools
+
+File:
+
+```text
+mcp_app/cds/__init__.py
+```
+
+Aggregation:
+
+```text
+TOOLS =
+  posts.SCHEMAS
+  + categories.SCHEMAS
+  + tags.SCHEMAS
+  + authors.SCHEMAS
+  + publisher.SCHEMAS
+  + content.SCHEMAS
+  + sitemaps.SCHEMAS
+  + static_files.SCHEMAS
+
+_HANDLER_REGISTRY =
+  posts.HANDLERS
+  + categories.HANDLERS
+  + tags.HANDLERS
+  + authors.HANDLERS
+  + publisher.HANDLERS
+  + content.HANDLERS
+  + sitemaps.HANDLERS
+  + static_files.HANDLERS
+```
+
+Dispatch:
+
+```text
+dispatch_cds_tool(credentials, name, args)
+  -> find handler in _HANDLER_REGISTRY
+  -> track active call concurrency
+  -> execute handler(credentials, args)
+  -> if CDS returns HTTP 401, return auth_expired structured error
+```
+
+CDS modules:
+
+```text
+mcp_app/cds/posts.py
+mcp_app/cds/categories.py
+mcp_app/cds/tags.py
+mcp_app/cds/authors.py
+mcp_app/cds/publisher.py
+mcp_app/cds/content.py
+mcp_app/cds/sitemaps.py
+mcp_app/cds/static_files.py
+```
+
+Compatibility shim:
+
+```text
+mcp_app/tools.py
+  -> re-exports TOOLS and dispatch_cds_tool
+  -> call_tool is a backward-compatible alias
+```
+
+Example CDS tool:
+
+```text
+tools/call name: fetch_published_posts
+  -> _handle_tool_call()
+  -> dispatch_cds_tool()
+  -> fetch_published_posts()
+  -> cds_get(credentials, "/posts/", params)
+  -> Publive CDS API
+  -> return JSON to MCP client
+```
+
+### CMS tools
+
+File:
+
+```text
+mcp_app/cms/__init__.py
+```
+
+Aggregation:
+
+```text
+CMS_TOOLS =
+  categories.SCHEMAS
+  + tags.SCHEMAS
+  + posts.SCHEMAS
+  + live_blog.SCHEMAS
+  + custom_components.SCHEMAS
+  + custom_content_types.SCHEMAS
+  + validators.SCHEMAS
+  + media.SCHEMAS
+  + newsletter.SCHEMAS
+  + reader.SCHEMAS
+
+CMS_TOOL_NAMES = frozenset(_HANDLER_REGISTRY.keys())
+```
+
+Dispatch:
+
+```text
+dispatch_cms_tool(credentials, name, args)
+  -> find handler in _HANDLER_REGISTRY
+  -> track active call concurrency
+  -> execute handler(credentials, args)
+```
+
+CMS modules:
+
+```text
+mcp_app/cms/categories.py
+mcp_app/cms/tags.py
+mcp_app/cms/posts.py
+mcp_app/cms/live_blog.py
+mcp_app/cms/custom_components.py
+mcp_app/cms/custom_content_types.py
+mcp_app/cms/validators.py
+mcp_app/cms/media.py
+mcp_app/cms/newsletter.py
+mcp_app/cms/reader.py
+```
+
+Compatibility shim:
+
+```text
+mcp_app/cms_tools.py
+  -> re-exports CMS_TOOLS and dispatch_cms_tool
+  -> call_cms_tool is a backward-compatible alias
+```
+
+Example CMS read tool:
+
+```text
+tools/call name: list_editorial_posts
+  -> _handle_tool_call()
+  -> dispatch_cms_tool()
+  -> list_editorial_posts()
+  -> cms_get(credentials, "/post/", params)
+  -> Publive CMS API
+```
+
+Example CMS write tool:
+
+```text
+tools/call name: create_post
+  -> _handle_tool_call()
+  -> validate required args
+  -> dispatch_cms_tool()
+  -> create_post()
+  -> if dry_run=true:
+       return preview only
+     else:
+       cms_post(credentials, "/post/", payload)
+```
+
+---
+
+## 13. CMS Write Safety Model
+
+CMS tools follow a safety model so AI clients do not accidentally mutate or
+delete content.
+
+General pattern:
+
+```text
+List/Get/Validate:
+  -> execute immediately
+
+Create:
+  -> dry_run=true by default for most create tools
+  -> returns preview
+  -> dry_run=false commits
+
+Update:
+  -> dry_run=true by default
+  -> fetches current object
+  -> returns field diff
+  -> dry_run=false applies patch
+
+Delete:
+  -> dry_run=true by default
+  -> returns item preview and warning
+  -> requires dry_run=false and confirm_delete=true to execute
+```
+
+Shared helper file:
+
+```text
+mcp_app/cms/helpers.py
+```
+
+Important helpers:
+
+```text
+preview_create_op()
+preview_update_op()
+preview_delete_op()
+DELETION_REQUIRES_CONFIRMATION
+validate_live_blog_post_type()
+```
+
+Post-specific behavior:
+
+- Draft posts may be created or updated immediately.
+- Publishing requires `confirm_publish=true` with `dry_run=false`.
+- Video post creation is blocked because of an upstream CMS validator issue.
+- Web Story and Gallery creation include extra validation guidance.
+- Some fields are treated as immutable after creation.
+
+---
+
+## 14. Publive API Clients
+
+### Shared client helpers
+
+File:
+
+```text
+mcp_app/clients/shared.py
+```
+
+Important functions:
+
+```text
+build_pooled_session()
+  -> creates requests.Session with connection pooling
+
+build_base_url(template, credentials)
+  -> requires credentials["publisherId"]
+  -> formats CDS_BASE_URL or CMS_BASE_URL
+
+build_basic_auth_headers(credentials)
+  -> base64(apiKey:apiSecret)
+  -> returns Authorization: Basic ...
+```
+
+Base URLs from settings:
+
+```text
+CDS_BASE_URL = https://cds-beta.thepublive.com/publisher/{publisher_id}
+CMS_BASE_URL = https://cms-beta.thepublive.com/publisher/{publisher_id}
+```
+
+Both are environment-overridable.
+
+Compatibility shims:
+
+```text
+mcp_app/cds_client.py
+  -> re-exports mcp_app.clients.cds helpers
+
+mcp_app/cms_client.py
+  -> re-exports mcp_app.clients.cms helpers
+```
+
+### CDS client
+
+File:
+
+```text
+mcp_app/clients/cds.py
+```
+
+Function:
+
+```text
+cds_get(credentials, path, params=None)
+```
+
+Flow:
+
+```text
+cds_get()
+  -> validate publisherId exists
+  -> build Basic Auth header
+  -> build URL from CDS_BASE_URL + path
+  -> clean empty params
+  -> GET request with 5s timeout
+  -> retry once on timeout or HTTP 408
+  -> return resp.json()
+```
+
+CDS errors are raised except for tool-level structured fallbacks such as
+`fetch_published_posts()` returning an `upstream_timeout` object.
+
+### CMS client
+
+File:
+
+```text
+mcp_app/clients/cms.py
+```
+
+Functions:
+
+```text
+cms_get()
+cms_post()
+cms_patch()
+cms_delete()
+```
+
+Flow:
+
+```text
+cms_*()
+  -> build URL from CMS_BASE_URL + path
+  -> build Basic Auth headers
+  -> send request with 10s timeout
+  -> on success, return resp.json()
+  -> on expected HTTP failure, return normalized error dict
+  -> on timeout, return retryable timeout dict
+```
+
+CMS writes are not retried automatically because duplicate writes could create
+or mutate content more than once.
+
+Normalized CMS error example:
+
+```json
+{
+  "error_type": "bad_request",
+  "message": "...",
+  "retryable": false
+}
+```
+
+---
+
+## 15. Database Model Deep Dive
+
+File:
+
+```text
+auth_app/models.py
+```
+
+### OAuthClient
+
+Table:
+
+```text
+oauth_client
+```
+
+Fields:
+
+```text
+client_id       unique client identifier
+redirect_uri    registered callback URI
+created_at      creation timestamp
+```
+
+Created by:
+
+```text
+oauth_register()
+```
+
+Also auto-created by:
+
+```text
+_validate_authorize_request()
+```
+
+when an unknown client id provides an acceptable redirect URI.
+
+### OAuthCode
+
+Table:
+
+```text
+oauth_code
+```
+
+Fields:
+
+```text
+code             single-use authorization code
+client_id        client requesting auth
+redirect_uri     callback URI
+code_challenge   PKCE challenge
+credentials      temporary Publive credentials
+expires_at       10 minute expiry
+```
+
+Created by:
+
+```text
+oauth_authorize()
+```
+
+Deleted by:
+
+```text
+oauth_token()
+```
+
+after successful token exchange or expiry detection.
+
+### OAuthToken
+
+Table:
+
+```text
+oauth_token
+```
+
+Fields:
+
+```text
+token            bearer access token
+client_id        OAuth client id
+publisher_id     Publive publisher id
+refresh_token    rotating refresh token
+credentials      JSON with apiKey/apiSecret
+created_at       creation timestamp
+```
+
+Created/reused by:
+
+```text
+oauth_token()
+```
+
+Read by:
+
+```text
+_resolve_oauth_token()
+```
+
+Deleted by:
+
+```text
+oauth_revoke()
+```
+
+### Django sessions
+
+Used by browser login.
+
+Configured in:
+
+```text
+publive_mcp/settings/base.py
+```
+
+```text
+SESSION_ENGINE = django.contrib.sessions.backends.db
+SESSION_COOKIE_AGE = 10 * 356 * 24 * 3600
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = Lax
+SESSION_SAVE_EVERY_REQUEST = True
+```
+
+Stores:
+
+```text
+credentials
+authenticatedAt
+session_created_at
+session_ttl_seconds
+```
+
+---
+
+## 16. Redis State Deep Dive
+
+Raw Redis client:
+
+```text
+mcp_app/redis_client.py
+  -> get_redis_client()
+  -> redis.Redis.from_url(REDIS_URL, decode_responses=True)
+```
+
+### SSE session store
+
+File:
+
+```text
+mcp_app/transport/redis_session_store.py
+```
+
+Functions:
+
+```text
+register_session()
+get_session()
+close_session()
+```
+
+Purpose:
+
+```text
+Allows GET /mcp and POST /mcp/message for the same session to land on different
+gunicorn threads, workers, or replicas and still find the session credentials.
+```
+
+### SSE message queue
+
+File:
+
+```text
+mcp_app/transport/redis_message_queue.py
+```
+
+Functions:
+
+```text
+push_message()
+pop_message()
+delete_queue()
+queue_depth()
+```
+
+Purpose:
+
+```text
+POST /mcp/message pushes a JSON-RPC response into Redis.
+The open GET /mcp SSE stream blocks on BLPOP and sends that response to the client.
+```
+
+### Session stats
+
+File:
+
+```text
+mcp_app/protocol/redis_session_stats.py
+```
+
+Functions:
+
+```text
+init_stats()
+increment()
+set_field()
+append_tool_sequence()
+get_timeline_and_set_client_name()
+get_field()
+pop_stats()
+```
+
+Purpose:
+
+```text
+Tracks tool counts, error counts, degraded counts, duration, estimated tokens,
+client name, trace id, and per-session write buckets.
+```
+
+### Prompt event rate limit
+
+File:
+
+```text
+mcp_app/protocol/session.py
+```
+
+Function:
+
+```text
+should_emit_prompt_event()
+  -> Redis key mcp:prompt_events:<minute_bucket>
+  -> max 1000 prompt events per minute cluster-wide
+```
+
+---
+
+## 17. Observability
+
+New Relic calls are wrapped so the app still runs when New Relic is absent.
+
+File:
+
+```text
+mcp_app/nr_utils.py
+```
+
+Common wrappers:
+
+```text
+set_txn_name()
+add_attrs()
+notice_err()
+record_event()
+record_metric()
+get_linking_metadata()
+suppress_apdex()
+suppress_trace()
+fn_trace()
+```
+
+Custom events include:
+
+```text
+MCPPrompt
+MCPToolError
+MCPToolDegraded
+MCPUnknownMethod
+SSESessionOpen
+SSESessionClose
+MCPSessionAbandoned
+MCPSessionMissing
+MCPSessionSummary
+```
+
+Prompt capture:
+
+```text
+mcp_app/prompt_capture.py
+  -> extract_prompt_for_tool_call()
+  -> record_prompt_observability()
+```
+
+Prompt text may come from:
+
+- HTTP headers
+- JSON-RPC `_meta`
+- Tool arguments
+
+The `_prompt` key is stripped before the tool handler runs.
+
+---
+
+## 18. Full End-to-End Traces
+
+### Trace A: AI client registers and calls a read tool over HTTP
+
+```text
+Client
+  -> POST /register
+  -> oauth_register()
+  -> check_origin()
+  -> is_registrable_redirect_uri()
+  -> OAuthClient.objects.create()
+  <- client_id
+
+Client
+  -> GET /authorize?...code_challenge...
+  -> oauth_authorize()
+  -> _validate_authorize_request()
+  -> render authorize.html
+
+User submits Publive credentials
+  -> POST /authorize
+  -> oauth_authorize()
+  -> validate_cds_credentials()
+  -> GET CDS /posts/?limit=1
+  -> OAuthCode.objects.create()
+  <- 302 redirect_uri?code=...
+
+Client
+  -> POST /token
+  -> oauth_token()
+  -> parse_oauth_token_body()
+  -> verify PKCE
+  -> delete OAuthCode
+  -> create/reuse OAuthToken
+  <- access_token
+
+Client
+  -> POST /mcp Authorization: Bearer <token>
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> _resolve_oauth_token()
+  -> http_mcp()
+  -> handle_http_request()
+  -> dispatch_jsonrpc()
+  -> method tools/call
+  -> _handle_tool_call()
+  -> dispatch_cds_tool()
+  -> fetch_published_posts()
+  -> cds_get()
+  -> GET Publive CDS /posts/
+  <- JSON-RPC response
+```
+
+### Trace B: Browser session calls a CMS write tool over HTTP
+
+```text
+Browser
+  -> GET /connect
+  -> connect()
+  <- connect.html
+
+Browser
+  -> POST /auth/login
+  -> auth_login()
+  -> validate_cds_credentials()
+  -> set_session_credentials()
+  <- success
+
+Browser or MCP client with session cookie
+  -> POST /mcp
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> _resolve_session()
+  -> http_mcp()
+  -> handle_http_request()
+  -> dispatch_jsonrpc()
+  -> _handle_tool_call()
+  -> dispatch_cms_tool()
+  -> create_post()
+  -> dry_run=true, return preview
+```
+
+If the user confirms:
+
+```text
+Client
+  -> POST /mcp tools/call create_post dry_run=false
+  -> create_post()
+  -> cms_post()
+  -> POST Publive CMS /post/
+  <- created post response
+```
+
+### Trace C: SSE client opens session and calls a tool
+
+```text
+Client
+  -> GET /mcp Authorization: Bearer <token>
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> sse_open()
+  -> open_sse_connection()
+  -> register_session() in Redis
+  -> init_stats() in Redis
+  <- SSE event: endpoint /mcp/message?sessionId=<uuid>
+
+Client
+  -> POST /mcp/message?sessionId=<uuid>
+  -> sse_message()
+  -> handle_sse_message()
+  -> get_session() from Redis
+  -> dispatch_jsonrpc()
+  -> _handle_tool_call()
+  -> dispatch_cds_tool() or dispatch_cms_tool()
+  -> push_message() into Redis queue
+  <- { "ok": true }
+
+Open SSE stream
+  -> pop_message() from Redis queue
+  <- event: message with JSON-RPC response
+
+Client disconnects
+  -> _close_sse_session()
+  -> close_session()
+  -> delete_queue()
+  -> pop_stats()
+  -> emit session summary events
+```
+
+### Trace D: Unknown method
+
+```text
+Client
+  -> POST /mcp { "method": "resources/list", "id": 1 }
+  -> mcp_endpoint()
+  -> handle_http_request()
+  -> dispatch_jsonrpc()
+  -> method in _UNIMPLEMENTED_METHODS
+  <- JSON-RPC error -32601
+```
+
+### Trace E: Invalid tool arguments
+
+```text
+Client
+  -> tools/call fetch_published_post with no identifier
+  -> dispatch_jsonrpc()
+  -> _handle_tool_call()
+  -> _validate_tool_args()
+  -> required field missing
+  <- JSON-RPC result with isError=true and invalid_params payload
+```
+
+---
+
+## 19. Important Settings and Environment Variables
+
+Required:
+
+```text
+DJANGO_SECRET_KEY
+```
+
+Production required:
+
+```text
+REDIS_URL
+```
+
+Common:
+
+```text
+BASE_URL
+DATABASE_URL
+CDS_BASE_URL
+CMS_BASE_URL
+MCP_QUEUE_MAXSIZE
+MCP_MAX_SSE_SESSIONS
+NEW_RELIC_LICENSE_KEY
+NEW_RELIC_APP_NAME
+NEW_RELIC_USER_KEY
+SERVER_VERSION
+```
+
+Defaults:
+
+```text
+BASE_URL=http://localhost:8000
+CDS_BASE_URL=https://cds-beta.thepublive.com/publisher/{publisher_id}
+CMS_BASE_URL=https://cms-beta.thepublive.com/publisher/{publisher_id}
+REDIS_URL=redis://127.0.0.1:6379/0
+MCP_QUEUE_MAXSIZE=100
+MCP_MAX_SSE_SESSIONS=2
+```
+
+---
+
+## 20. Security Summary
+
+Security controls in this project:
+
+```text
+PKCE S256
+  -> protects OAuth code exchange for native clients
+
+CDS credential validation before token/session issue
+  -> validates publisherId/apiKey/apiSecret before storing them
+
+Redirect URI validation
+  -> only HTTPS or loopback HTTP
+
+Origin allowlist
+  -> check_origin() currently runs on /register and /token
+
+Authorization code TTL
+  -> 10 minute single-use OAuth codes
+
+Refresh token rotation
+  -> row-locked transaction with select_for_update()
+
+Rate limiting
+  -> auth endpoints per IP, MCP per token prefix or IP
+
+Security headers
+  -> applied to HTML responses
+
+Redis-backed SSE session admission gate
+  -> avoids too many long-lived streams occupying gunicorn threads
+
+SSE sessionId lookup
+  -> /mcp/message uses the Redis session created by authenticated GET /mcp
+
+CMS write dry-run and confirmation rules
+  -> protects create/update/delete workflows
+```
+
+Credential storage notes:
+
+- OAuth tokens are stored in the database.
+- OAuth token credentials are stored as JSON.
+- Browser session credentials are stored in Django sessions.
+- SSE credentials are stored in Redis for the lifetime of the SSE session.
+- Treat SSE `sessionId` values as bearer-like secrets for that stream lifetime.
+- Redis and database access must be network-protected in production.
+
+---
+
+## 21. Quick Function Map
+
+### Entry points
+
+```text
+health_check()             GET /
+mcp_endpoint()             GET/POST /mcp
+sse_message()              POST /mcp/message
+oauth_register()           POST /register
+oauth_authorize()          GET/POST /authorize, /oauth/authorize
+oauth_token()              POST /token, /oauth/token
+oauth_revoke()             POST /revoke, /oauth/revoke
+oauth_userinfo()           GET /userinfo
+connect()                  GET /connect
+auth_login()               POST /auth/login
+auth_status()              GET /auth/status
+auth_logout()              POST /auth/logout
+```
+
+### MCP core
+
+```text
+resolve_credentials()
+identify_mcp_client()
+build_unauthorized_response()
+handle_http_request()
+open_sse_connection()
+handle_sse_message()
+dispatch_jsonrpc()
+_handle_tool_call()
+_validate_tool_args()
+dispatch_cds_tool()
+dispatch_cms_tool()
+```
+
+### Publive API clients
+
+```text
+cds_get()
+cms_get()
+cms_post()
+cms_patch()
+cms_delete()
+build_base_url()
+build_basic_auth_headers()
+```
+
+### Redis helpers
+
+```text
+get_redis_client()
+register_session()
+get_session()
+close_session()
+push_message()
+pop_message()
+delete_queue()
+queue_depth()
+init_stats()
+increment()
+set_field()
+append_tool_sequence()
+pop_stats()
+```
+
+---
+
+## 22. Mental Model
+
+Think of the project as a pipeline:
+
+```text
+HTTP request
+  -> Django middleware
+  -> URL router
+  -> auth or MCP view
+  -> credential resolution
+  -> transport handler
+  -> JSON-RPC dispatcher
+  -> tool registry
+  -> tool handler
+  -> CDS/CMS HTTP client
+  -> Publive API
+  -> normalized response
+  -> JSON-RPC response
+  -> HTTP response or SSE message
+```
+
+The most important code path for MCP is:
+
+```text
+/mcp
+  -> mcp_endpoint()
+  -> resolve_credentials()
+  -> http_mcp() or sse_open()
+  -> handle_http_request() or open_sse_connection()/handle_sse_message()
+  -> dispatch_jsonrpc()
+  -> _handle_tool_call()
+  -> dispatch_cds_tool() or dispatch_cms_tool()
+  -> actual handler in mcp_app/cds/* or mcp_app/cms/*
+  -> cds_get() or cms_get/post/patch/delete()
+  -> Publive API
+```
+
+That is the end-to-end flow from endpoint to function to downstream API.

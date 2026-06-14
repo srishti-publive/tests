@@ -40,7 +40,6 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/publive_mcp
       REDIS_URL: redis://redis:6379/0
       BASE_URL: http://localhost:8000
-      CREDENTIALS_ENCRYPTION_KEY: ""   # Set a real Fernet key for persistent local dev
     depends_on:
       db:
         condition: service_healthy

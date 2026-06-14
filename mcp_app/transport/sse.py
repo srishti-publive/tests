@@ -7,7 +7,6 @@ Handles:
 import json
 import logging
 import os
-import queue
 import threading
 import time
 import uuid
@@ -35,14 +34,32 @@ from mcp_app.protocol.session_store import (
     init_stats,
     pop_stats,
 )
+from mcp_app.transport.redis_message_queue import (
+    delete_queue,
+    pop_message,
+    push_message,
+    queue_depth,
+)
+from mcp_app.transport.redis_session_store import (
+    close_session,
+    get_session,
+    register_session,
+)
 
 logger = logging.getLogger(__name__)
 
+# Session registry and per-session message queues live in Redis (see
+# redis_session_store.py / redis_message_queue.py) — shared across every
+# worker/replica, which is what lets `GET /mcp` and `POST /mcp/message` for the
+# same session land on different processes. Previously an in-process dict
+# (`_sse_sessions`) + per-session `queue.Queue`, which pinned the app to exactly
+# one gunicorn worker.
 _MCP_QUEUE_MAXSIZE = int(os.environ.get("MCP_QUEUE_MAXSIZE", "100"))
 
-# In-process session registry: session_id → {credentials, token_expires_at, queue}
-_sse_sessions: dict = {}
-_sessions_lock = threading.Lock()
+# Admission gate: each SSE stream pins one gunicorn thread for its lifetime, so
+# concurrent streams must stay safely below the thread count or message POSTs
+# (and everything else) starve. Rule of thumb: threads − 2.
+_MAX_SSE_SESSIONS = int(os.environ.get("MCP_MAX_SSE_SESSIONS", "2"))
 
 
 def _add_session_protocol_attrs(request) -> None:
@@ -51,67 +68,6 @@ def _add_session_protocol_attrs(request) -> None:
     protocol_version = request.session.get(SESSION_PROTOCOL_KEY)
     if protocol_version:
         add_attrs([("mcp.protocol_version", protocol_version)])
-
-
-# ── session registry helpers ──────────────────────────────────────────────────
-
-def register_session(session_id: str, credentials: dict, token_expires_at) -> int:
-    with _sessions_lock:
-        _sse_sessions[session_id] = {
-            "credentials":      credentials or {},
-            "token_expires_at": token_expires_at,
-            "queue":            queue.Queue(maxsize=_MCP_QUEUE_MAXSIZE),
-        }
-        return len(_sse_sessions)
-
-
-def get_session(session_id: str):
-    with _sessions_lock:
-        entry = _sse_sessions.get(session_id)
-    if entry is None:
-        return None
-    return entry["credentials"], entry["token_expires_at"]
-
-
-def close_session(session_id: str) -> int:
-    with _sessions_lock:
-        _sse_sessions.pop(session_id, None)
-        return len(_sse_sessions)
-
-
-def _get_queue(session_id: str):
-    with _sessions_lock:
-        entry = _sse_sessions.get(session_id)
-    return entry["queue"] if entry else None
-
-
-def push_message(session_id: str, message: dict, timeout: float = 5.0) -> bool:
-    q = _get_queue(session_id)
-    if q is None:
-        return False
-    try:
-        q.put(message, block=True, timeout=timeout)
-        return True
-    except queue.Full:
-        return False
-
-
-def pop_message(session_id: str, timeout: float):
-    q = _get_queue(session_id)
-    if q is None:
-        return None
-    t0 = time.time()
-    try:
-        msg = q.get(block=True, timeout=timeout)
-        wait_ms = round((time.time() - t0) * 1000, 2)
-        return wait_ms, msg
-    except queue.Empty:
-        return None
-
-
-def queue_depth(session_id: str) -> int:
-    q = _get_queue(session_id)
-    return q.qsize() if q else 0
 
 
 # ── SSE connection ────────────────────────────────────────────────────────────
@@ -140,6 +96,31 @@ def open_sse_connection(request, credentials: dict, token_expires_at):
     )
 
     active_on_open = register_session(session_id, credentials, token_expires_at)
+
+    # Admission gate — register first (SADD+SCARD is atomic in one pipeline),
+    # then roll back if this connection pushed the count over the cap. Rejecting
+    # cleanly beats accepting: a stream pinned to the last free thread starves
+    # POST /mcp/message for every session, deadlocking the whole server.
+    if active_on_open > _MAX_SSE_SESSIONS:
+        close_session(session_id)
+        record_metric("Custom/MCP/sse_admission_rejected_count", 1)
+        add_attrs([("mcp.sse_admission_rejected", True)])
+        logger.warning(
+            "SSE session rejected (capacity %d reached): session=%s publisher=%s",
+            _MAX_SSE_SESSIONS, session_id, publisher_id,
+        )
+        resp = JsonResponse(
+            {
+                "error": "server_at_capacity",
+                "error_description": (
+                    "Too many concurrent SSE sessions. Retry shortly, or use the "
+                    "Streamable HTTP transport (POST /mcp) which has no session cap."
+                ),
+            },
+            status=503,
+        )
+        resp["Retry-After"] = "30"
+        return resp
 
     open_linking     = get_linking_metadata()
     session_trace_id = open_linking.get("trace.id", "")
@@ -190,6 +171,7 @@ def _close_sse_session(session_id: str, publisher_id: str, stream_t0: float) -> 
     duration_ms = round((time.perf_counter() - stream_t0) * 1000, 2)
 
     active_on_close = close_session(session_id)
+    delete_queue(session_id)
 
     stats = pop_stats(session_id)
 
@@ -324,7 +306,7 @@ def handle_sse_message(request) -> HttpResponse:
         if response_msg is not None:
             # 5 s cap: with few worker threads, one thread blocked on a dead
             # client's full queue is a large share of total server capacity.
-            ok = push_message(session_id, response_msg, timeout=5.0)
+            ok = push_message(session_id, response_msg, maxsize=_MCP_QUEUE_MAXSIZE, timeout=5.0)
             if not ok:
                 record_metric("Custom/MCP/queue_overflow_count", 1)
                 add_attrs([("mcp.queue_overflow", True)])

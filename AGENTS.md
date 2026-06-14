@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -61,7 +61,7 @@ python manage.py test mcp_app.tests.TestClassName.test_method_name
 ### Auth Layer (`auth_app/`)
 
 Two auth paths:
-1. **OAuth 2.0 + PKCE** (`/register`, `/oauth/authorize`, `/oauth/token`): For API clients (Claude Desktop, Cursor). Issues `OAuthToken` records (no expiry — permanent until revoked or upserted) that are stored in the database and resolved by `views.py` on each tool call.
+1. **OAuth 2.0 + PKCE** (`/register`, `/oauth/authorize`, `/oauth/token`): For API clients (Codex Desktop, Cursor). Issues `OAuthToken` records (no expiry — permanent until revoked or upserted) that are stored in the database and resolved by `views.py` on each tool call.
 2. **Session auth** (`/connect`, `/auth/login`): Browser-based login that stores credentials in Django sessions (no self-expiry — `session_ttl_seconds = -1` and a 10-year cookie ceiling; ends only via explicit `/auth/logout`).
 
 Both paths validate credentials against the CDS API before issuing tokens/sessions.
