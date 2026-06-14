@@ -6,10 +6,13 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies required by psycopg2
+# Install system dependencies: libpq-dev/gcc for psycopg2, redis-server to run
+# an in-container Redis (sessions, queues, stats, rate limits) instead of an
+# external instance.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gcc \
+    redis-server \
     && rm -rf /var/lib/apt/lists/*
     # package metadata & cache remove
 

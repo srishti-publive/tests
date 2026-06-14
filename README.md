@@ -76,16 +76,36 @@ Per-session write cap: **100 create ops** and **100 update/delete ops** independ
 
 ## Running Locally
 
+**Prerequisites:** Python 3.12 and a running Redis (backs SSE sessions, queues, stats, and rate limits). Postgres is optional locally — the app falls back to SQLite when `DATABASE_URL` is unset.
+
 ```bash
-cp .env.example .env        # fill in DJANGO_SECRET_KEY at minimum
+# 1. Configure environment
+cp .env.example .env          # fill in DJANGO_SECRET_KEY at minimum
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Start Redis (defaults to redis://127.0.0.1:6379/0)
+redis-server                  # or: brew services start redis
+
+# 4. Apply migrations and run the dev server
 python manage.py migrate
-python manage.py runserver
+python manage.py runserver    # http://localhost:8000
 ```
 
-Or with Docker:
+The dev server uses `publive_mcp.settings.local` (set in `manage.py`), which keeps `DEBUG=on` and does **not** require `REDIS_URL` to be exported — it defaults to localhost.
+
+### With Docker (recommended — no local Redis/Postgres needed)
+
+`docker compose up` builds the image and starts **Postgres + Redis + the web server** together, runs migrations, and serves on port 8000:
+
 ```bash
-docker compose up
+docker compose up            # add --build after changing the Dockerfile/requirements
 ```
+
+Open http://localhost:8000 — `GET /` is the health check. Stop with `Ctrl+C`, or `docker compose down -v` to also wipe the Postgres volume.
+
+> The production `Dockerfile` bundles its own `redis-server` and starts it from `entrypoint.sh`, so the deployed container needs no external Redis. `docker compose` instead uses a dedicated `redis` service.
 
 ---
 
