@@ -16,9 +16,16 @@ python manage.py migrate --noinput 2>&1 || echo "[entrypoint] !!! migrate FAILED
 echo "[entrypoint] auth_app migration status:"
 python manage.py showmigrations auth_app 2>&1 || true
 
-echo "[entrypoint] starting gunicorn on port ${PORT:-8000}"
+# Worker count is env-tunable (WEB_CONCURRENCY, gunicorn's standard var) so it can
+# be bumped or rolled back from Railway without rebuilding the image — the staged,
+# trivially-revertible rollout the architecture was designed for. Safe to run >1
+# now that sessions, queues, stats and rate limits all live in Redis (shared across
+# workers via the in-container/external Redis), not in per-process dicts.
+# NOTE: multiple *replicas* (separate containers) additionally require an EXTERNAL
+# shared REDIS_URL — the in-container Redis is per-container and not shared.
+echo "[entrypoint] starting gunicorn on port ${PORT:-8000} (workers=${WEB_CONCURRENCY:-2})"
 exec gunicorn publive_mcp.wsgi \
-    -w 1 --threads 4 \
+    -w "${WEB_CONCURRENCY:-2}" --threads "${GUNICORN_THREADS:-4}" \
     -b 0.0.0.0:"${PORT:-8000}" \
     --timeout 60 \
     --access-logfile -
