@@ -15,7 +15,17 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "publive_mcp.settings")
 # accidentally dropped on 2026-06-04, which stopped all NR reporting.
 
 _NR_CONFIG = Path(__file__).resolve().parent.parent / "newrelic.ini"
-newrelic.agent.initialize(str(_NR_CONFIG))
+if _NR_CONFIG.is_file():
+    newrelic.agent.initialize(str(_NR_CONFIG))
+else:
+    # Don't crash-loop the whole server over a missing observability config —
+    # but make the degradation loud, not silent (it's what hid this for days).
+    print(
+        f"[startup] WARNING: New Relic config not found at {_NR_CONFIG} — "
+        "agent NOT initialized, no telemetry will be reported.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 # ── Graceful NR harvest on SIGTERM ────────────────────────────────────────────
