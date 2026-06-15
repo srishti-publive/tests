@@ -44,6 +44,7 @@ from mcp_app.transport.session_registry import (
     close_session,
     get_session,
     register_session,
+    touch_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,9 @@ def open_sse_connection(request, credentials: dict):
         try:
             while True:
                 popped = pop_message(session_id, timeout=25)
+                # Refresh the heartbeat every loop (≤25 s apart) so this live stream
+                # never goes stale and never gets pruned by the admission gate.
+                touch_session(session_id)
                 if popped is None:
                     yield ": keepalive\n\n"
                     continue

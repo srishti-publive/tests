@@ -6,9 +6,11 @@ shared across every gunicorn worker/replica — the property that previously
 required Redis — so `GET /mcp` and `POST /mcp/message` for the same session can
 land on different processes and still find each other.
 
-Rows live until explicitly deleted (session close, message delivery, code
-redemption); there is no expiry/TTL. Credentials are stored as plain JSON, matching
-how they're stored elsewhere (encryption was deliberately removed).
+Most rows live until explicitly deleted (message delivery, code redemption).
+`SSESession` is the exception: it carries a `last_seen` heartbeat so streams that
+die without a clean close go stale and get pruned (see session_registry), rather
+than leaking rows that block the admission gate. Credentials are stored as plain
+JSON, matching how they're stored elsewhere (encryption was deliberately removed).
 """
 from django.db import models
 
@@ -21,6 +23,11 @@ class SSESession(models.Model):
     credentials      = models.JSONField(default=dict)
     session_trace_id = models.CharField(max_length=128, blank=True, default="")
     created_at       = models.DateTimeField(auto_now_add=True)
+    # Heartbeat: refreshed on every keepalive/message so a stream that dies without
+    # a clean close (TCP reset, worker kill, redeploy) goes stale and stops counting
+    # against the admission gate, instead of leaking a row that blocks new sessions
+    # forever. See session_registry.active_count() / prune_stale_sessions().
+    last_seen        = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         db_table = "mcp_sse_session"
