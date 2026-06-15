@@ -27,8 +27,17 @@ python manage.py showmigrations auth_app 2>&1 || true
 # workers via the in-container/external Redis), not in per-process dicts.
 # NOTE: multiple *replicas* (separate containers) additionally require an EXTERNAL
 # shared REDIS_URL — the in-container Redis is per-container and not shared.
-echo "[entrypoint] starting gunicorn on port ${PORT:-8000} (workers=${WEB_CONCURRENCY:-2})"
-exec gunicorn publive_mcp.wsgi \
+# Launch under the New Relic admin wrapper so the agent actually bootstraps:
+# `newrelic-admin run-program` calls newrelic.agent.initialize() for us (loading
+# the config file, registering with the collector, and starting the harvest +
+# log-forwarding thread) before exec'ing gunicorn. Without this the WSGI wrapper in
+# wsgi.py has no initialized agent behind it and nothing — APM, custom events, or
+# forwarded logs — is ever reported. The agent reads NEW_RELIC_CONFIG_FILE to find
+# its ini; point it at the one baked into the image.
+export NEW_RELIC_CONFIG_FILE="${NEW_RELIC_CONFIG_FILE:-/app/newrelic.ini}"
+
+echo "[entrypoint] starting gunicorn on port ${PORT:-8000} (workers=${WEB_CONCURRENCY:-2}) under newrelic-admin"
+exec newrelic-admin run-program gunicorn publive_mcp.wsgi \
     -w "${WEB_CONCURRENCY:-2}" --threads "${GUNICORN_THREADS:-4}" \
     -b 0.0.0.0:"${PORT:-8000}" \
     --timeout 60 \
