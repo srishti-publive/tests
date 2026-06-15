@@ -36,3 +36,28 @@ class OAuthToken(models.Model):
         ordering = ["-created_at"]
         verbose_name = "OAuth Token"
         verbose_name_plural = "OAuth Tokens"
+
+
+class OAuthAuthorizationCode(models.Model):
+    """
+    Single-use OAuth 2.0 PKCE authorization code: minted at /oauth/authorize,
+    redeemed once at /oauth/token, then deleted.
+
+    Replaces the prior Redis store (GETDEL). Single-use is enforced by an atomic
+    select-for-update-then-delete in oauth_code_store.pop_code. There is no expiry:
+    a code lives until it is redeemed (then deleted). credentials stores
+    {publisherId, apiKey, apiSecret}.
+    """
+
+    code           = models.CharField(max_length=128, unique=True, db_index=True)
+    client_id      = models.CharField(max_length=64, blank=True, default="")
+    redirect_uri   = models.CharField(max_length=512, blank=True, default="")
+    code_challenge = models.CharField(max_length=128, blank=True, default="")
+    credentials    = models.JSONField()
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "oauth_authorization_code"
+        ordering = ["-created_at"]
+        verbose_name = "OAuth Authorization Code"
+        verbose_name_plural = "OAuth Authorization Codes"

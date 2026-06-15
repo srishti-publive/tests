@@ -77,19 +77,16 @@ DATABASES = {
 }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-# Redis-backed so the cache (rate limits) is shared across gunicorn workers/replicas.
-# The raw redis-py client in mcp_app/redis_client.py (sessions, queues, stats) reads
-# the same REDIS_URL.
-
-REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+# Database-backed (DatabaseCache) so the cache — which backs HTTP rate limiting
+# and the MCPPrompt event budget — is shared across gunicorn workers/replicas via
+# the database, with no separate service. The table is created by
+# `manage.py createcachetable` (run in entrypoint.sh). SSE sessions, queues, and
+# stats use dedicated models (see mcp_app/models.py), not the cache.
 
 CACHES = {
     "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        },
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "publive_cache_table",
     }
 }
 

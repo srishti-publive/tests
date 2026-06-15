@@ -16,9 +16,11 @@ Current code inventory:
 - Total tool schemas in code: 69
 - Main MCP protocol version returned by the server: `2024-11-05`
 
-Note: older docs in the repository may mention 61 tools or in-memory SSE state.
-The current code uses Redis for SSE sessions, SSE queues, session stats, prompt
-rate limits, and Django cache-backed rate limits.
+Note: older docs in the repository may mention 61 tools, in-memory SSE state, or
+Redis. The current code is database-backed: dedicated models for SSE sessions, SSE
+queues, session stats, and single-use OAuth codes, plus Django `DatabaseCache` for
+prompt rate limits and HTTP rate limits. Redis has been removed entirely (any
+"Redis State Deep Dive" section below is superseded).
 
 ---
 

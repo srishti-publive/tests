@@ -1,45 +1,52 @@
-"""Redis-backed store for single-use OAuth PKCE authorization codes.
+"""Database-backed store for single-use OAuth PKCE authorization codes.
 
-Authorization codes are ephemeral: minted at ``/oauth/authorize``, redeemed once
-at ``/oauth/token`` within 10 minutes, then gone. Redis fits this far better than a
-durable table — TTL handles expiry for free, and ``GETDEL`` enforces true single-use
-atomically across processes/replicas (no double-redemption race). Reuses the shared
-client from ``mcp_app.redis_client``; no expiry timestamp is stored because the TTL
-is the expiry.
+Authorization codes are minted at ``/oauth/authorize`` and redeemed once at
+``/oauth/token``. Backed by the ``OAuthAuthorizationCode`` model. Single-use is
+enforced by an atomic select-for-update-then-delete (replacing Redis ``GETDEL``).
+There is no expiry/TTL: a code lives until it is redeemed, then it is deleted.
 """
-import json
 from typing import Optional
 
-from mcp_app.redis_client import get_redis_client
+from django.db import transaction
 
-_TTL_SECONDS = 600  # 10 minutes
-_PREFIX = "oauth:code:"
-
-
-def _key(code: str) -> str:
-    return f"{_PREFIX}{code}"
+from .models import OAuthAuthorizationCode
 
 
 def store_code(code: str, client_id: str, redirect_uri: str,
                code_challenge: str, credentials: dict) -> None:
-    """Persist a freshly-minted authorization code with a 10-minute TTL."""
-    payload = json.dumps({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "code_challenge": code_challenge,
-        "credentials": credentials,
-    })
-    get_redis_client().set(_key(code), payload, ex=_TTL_SECONDS)
+    """Persist a freshly-minted authorization code."""
+    OAuthAuthorizationCode.objects.update_or_create(
+        code=code,
+        defaults={
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "credentials": credentials,
+        },
+    )
 
 
 def pop_code(code: str) -> Optional[dict]:
     """Atomically fetch-and-delete a code (single-use).
 
-    Returns the stored dict, or None if the code is unknown or TTL-expired.
-    The atomic GETDEL guarantees a second redemption of the same code finds
-    nothing, so each code can be exchanged at most once.
+    Returns the stored dict, or None if the code is unknown. The
+    select-for-update-then-delete guarantees a second redemption of the same code
+    finds nothing, so each code can be exchanged at most once.
     """
-    raw = get_redis_client().getdel(_key(code))
-    if raw is None:
-        return None
-    return json.loads(raw)
+    with transaction.atomic():
+        row = (
+            OAuthAuthorizationCode.objects
+            .select_for_update(skip_locked=True)
+            .filter(code=code)
+            .first()
+        )
+        if row is None:
+            return None
+        payload = {
+            "client_id": row.client_id,
+            "redirect_uri": row.redirect_uri,
+            "code_challenge": row.code_challenge,
+            "credentials": row.credentials,
+        }
+        row.delete()
+        return payload

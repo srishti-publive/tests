@@ -34,13 +34,13 @@ from mcp_app.protocol.session_store import (
     init_stats,
     pop_stats,
 )
-from mcp_app.transport.redis_message_queue import (
+from mcp_app.transport.message_queue import (
     delete_queue,
     pop_message,
     push_message,
     queue_depth,
 )
-from mcp_app.transport.redis_session_store import (
+from mcp_app.transport.session_registry import (
     close_session,
     get_session,
     register_session,
@@ -48,12 +48,11 @@ from mcp_app.transport.redis_session_store import (
 
 logger = logging.getLogger(__name__)
 
-# Session registry and per-session message queues live in Redis (see
-# redis_session_store.py / redis_message_queue.py) — shared across every
-# worker/replica, which is what lets `GET /mcp` and `POST /mcp/message` for the
-# same session land on different processes. Previously an in-process dict
-# (`_sse_sessions`) + per-session `queue.Queue`, which pinned the app to exactly
-# one gunicorn worker.
+# Session registry and per-session message queues live in the database (see
+# session_registry.py / message_queue.py) — shared across every worker/replica,
+# which is what lets `GET /mcp` and `POST /mcp/message` for the same session land
+# on different processes. Previously an in-process dict (`_sse_sessions`) +
+# per-session `queue.Queue`, which pinned the app to exactly one gunicorn worker.
 _MCP_QUEUE_MAXSIZE = int(os.environ.get("MCP_QUEUE_MAXSIZE", "100"))
 
 # Admission gate: each SSE stream pins one gunicorn thread for its lifetime, so

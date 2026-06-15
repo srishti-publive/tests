@@ -24,7 +24,7 @@ python manage.py test
 python manage.py test mcp_app.tests.TestClassName.test_method_name
 ```
 
-**Environment:** Copy `.env.example` to `.env` and fill in values before running locally. Requires `DJANGO_SECRET_KEY`, optionally `DATABASE_URL` (defaults to SQLite), and `REDIS_URL` (defaults to `redis://127.0.0.1:6379/0` locally; **required in prod** — `settings/prod.py` refuses to boot without it). Redis backs the SSE session registry, per-session message queues, session stats, rate limiting, and the SSE admission gate (`MCP_MAX_SSE_SESSIONS`, default 2).
+**Environment:** Copy `.env.example` to `.env` and fill in values before running locally. Requires `DJANGO_SECRET_KEY`, optionally `DATABASE_URL` (defaults to SQLite). No Redis. The database backs the SSE session registry (`SSESession`), per-session message queues (`SSEMessage`), session stats (`SessionStats`/`SessionToolEvent`), the SSE admission gate (`MCP_MAX_SSE_SESSIONS`, default 2), and single-use OAuth codes (`OAuthAuthorizationCode`); HTTP rate limiting and the MCPPrompt budget use Django's `DatabaseCache` (table `publive_cache_table`, created via `manage.py createcachetable`). The SSE stream polls the message table every 250ms (a DB has no blocking pop).
 
 **Deployment:** Docker image (`Dockerfile`, `python:3.12-slim`) deployed to Railway, run with gunicorn (`-w 1 --threads 50`, see `entrypoint.sh`). There is no `Procfile` / release phase — `collectstatic` runs at image build time, and `entrypoint.sh` runs `migrate --noinput` then execs gunicorn on every container start. See `docs/deployment.md` for details.
 
@@ -87,5 +87,5 @@ For CMS write tools, follow the dry_run/confirm pattern matching the tier of the
 
 Two things you must know before deploying
 
-1. Provision Redis on Railway and set REDIS_URL first — prod now intentionally won't boot without it.
-2. -w 1 --threads 4 is unchanged, per your decision. The architecture no longer requires one worker — sessions, queues, stats, and rate limits are all cross-process now — but per the original staged-rollout plan, bump workers/replicas in a separate, trivially-revertible deploy while watching MCPSessionMissing and queue_overflow_count.
+1. The only hard prod dependency is the database (`DATABASE_URL` on Railway). No Redis. `entrypoint.sh` runs `migrate` then `createcachetable` on every start.
+2. Workers default to 2 (`WEB_CONCURRENCY`, threads via `GUNICORN_THREADS`, default 4). The architecture no longer requires one worker — sessions, queues, stats, and rate limits are all cross-process via the database now, so multiple workers *and* multiple replicas share the same state through `DATABASE_URL`.

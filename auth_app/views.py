@@ -391,8 +391,8 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         code: str = data.get("code", "")
         code_verifier: str = data.get("code_verifier", "")
 
-        # Atomic fetch-and-delete (single-use). None means unknown OR TTL-expired —
-        # Redis has already evicted expired codes, so both collapse to one case.
+        # Atomic fetch-and-delete (single-use). None means the code is unknown
+        # (never issued, or already redeemed and thus deleted).
         auth_code = pop_code(code)
         if auth_code is None:
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])

@@ -3,16 +3,16 @@ import hashlib
 import time
 import uuid
 
-from mcp_app.redis_client import get_redis_client
+from django.core.cache import cache
 
 SESSION_PROTOCOL_KEY = "mcp_protocol_version"
 _SESSION_PROTOCOL_KEY = SESSION_PROTOCOL_KEY  # backward-compat alias
 
 # MCPPrompt event rate limit: at most this many per minute, cluster-wide. Backed
-# by a Redis fixed-window counter (key = current minute bucket, INCR + EXPIRE) so
-# the budget is shared across every worker/replica — a per-process counter would
-# silently become `limit × process_count` once the app scales horizontally,
-# defeating its purpose as a New-Relic cost-control gate.
+# by a fixed-window counter in the shared Django cache (DatabaseCache, key = current
+# minute bucket) so the budget is shared across every worker/replica — a per-process
+# counter would silently become `limit × process_count` once the app scales
+# horizontally, defeating its purpose as a New-Relic cost-control gate.
 _PROMPT_EVENT_MAX_PER_MIN = 1000
 _PROMPT_EVENT_KEY_TTL     = 120  # > window length, so a bucket always self-expires
 
@@ -40,16 +40,21 @@ def derive_session_id(request) -> str:
 def should_emit_prompt_event() -> bool:
     """Return True when under the per-minute, cluster-wide MCPPrompt event budget.
 
-    Fixed window keyed by the current UTC minute: INCR is atomic on the Redis
-    side, so concurrent callers across every process/replica still get a single
-    consistent count with no lock. EXPIRE is set only by whichever caller first
-    creates the bucket (count == 1), and is generous (2x the window) so a
-    slow-to-arrive request near a window boundary can't race the key's deletion.
+    Fixed window keyed by the current UTC minute. `cache.add` seeds the bucket with
+    a generous TTL (2x the window, so a bucket always self-expires) only on the
+    first call; `cache.incr` then bumps the shared (DatabaseCache) counter. Unlike
+    Redis INCR this read-modify-write isn't strictly atomic across workers, so the
+    count can drift by a few under heavy concurrency — acceptable for a coarse
+    cost-control gate that errs toward emitting, not dropping.
     """
-    client = get_redis_client()
     bucket = int(time.time() // 60)
     key    = f"mcp:prompt_events:{bucket}"
-    count  = client.incr(key)
-    if count == 1:
-        client.expire(key, _PROMPT_EVENT_KEY_TTL)
+    # add() is a no-op if the key already exists, so only the first caller sets the TTL.
+    cache.add(key, 0, timeout=_PROMPT_EVENT_KEY_TTL)
+    try:
+        count = cache.incr(key)
+    except ValueError:
+        # Bucket evicted/expired between add() and incr(); treat as a fresh window.
+        cache.add(key, 1, timeout=_PROMPT_EVENT_KEY_TTL)
+        count = 1
     return count <= _PROMPT_EVENT_MAX_PER_MIN
