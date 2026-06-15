@@ -1,6 +1,5 @@
 # Responsibility: HTTP view handlers for OAuth 2.0 PKCE flow and session-based auth.
 import base64
-from datetime import timedelta
 import hashlib
 import json
 import logging
@@ -21,7 +20,8 @@ import requests
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 from mcp_app.protocol.auth import build_unauthorized_response, resolve_credentials
 
-from .models import OAuthClient, OAuthCode, OAuthToken
+from .models import OAuthClient, OAuthToken
+from .oauth_code_store import pop_code, store_code
 from .services import (
     check_origin,
     check_session_ttl,
@@ -283,14 +283,13 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
             return render(request, "authorize.html", ctx)
 
         code: str = secrets.token_urlsafe(32)
-        OAuthCode.objects.create(
+        store_code(
             code=code,
             client_id=client_id,
             redirect_uri=redirect_uri,
             #  code_challenge = base64url(SHA256(code_verifier))
             code_challenge=code_challenge,
             credentials={"publisherId": publisher_id, "apiKey": api_key, "apiSecret": api_secret},
-            expires_at=timezone.now() + timedelta(minutes=10),
         )
 
         add_attrs([
@@ -392,32 +391,26 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         code: str = data.get("code", "")
         code_verifier: str = data.get("code_verifier", "")
 
-        try:
-            auth_code = OAuthCode.objects.get(code=code)
-        except OAuthCode.DoesNotExist:
+        # Atomic fetch-and-delete (single-use). None means unknown OR TTL-expired —
+        # Redis has already evicted expired codes, so both collapse to one case.
+        auth_code = pop_code(code)
+        if auth_code is None:
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: unknown code client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "Unknown code"}, status=400)
 
-        if auth_code.expires_at < timezone.now():
-            auth_code.delete()
-            add_attrs([("auth.result", "failure"), ("auth.failure_reason", "expired_token")])
-            record_metric("Custom/Auth/auth_failure_count", 1)
-            logger.warning("OAuth token: expired code client=%s", data.get("client_id"))
-            return JsonResponse({"error": "invalid_grant", "error_description": "Code expired"}, status=400)
-
         expected: str = base64.urlsafe_b64encode(
             hashlib.sha256(code_verifier.encode()).digest()
         ).rstrip(b"=").decode()
-        if expected != auth_code.code_challenge:
+        if expected != auth_code["code_challenge"]:
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_pkce")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: PKCE verification failed client=%s", data.get("client_id"))
             return JsonResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status=400)
 
         token_redirect_uri: str = data.get("redirect_uri", "")
-        if auth_code.redirect_uri and token_redirect_uri != auth_code.redirect_uri:
+        if auth_code["redirect_uri"] and token_redirect_uri != auth_code["redirect_uri"]:
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "invalid_redirect_uri")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: redirect_uri mismatch client=%s", data.get("client_id"))
@@ -426,10 +419,9 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
                 status=400,
             )
 
-        credentials: dict    = auth_code.credentials
-        oauth_client_id: str = data.get("client_id") or auth_code.client_id
+        credentials: dict    = auth_code["credentials"]
+        oauth_client_id: str = data.get("client_id") or auth_code["client_id"]
         publisher_id         = credentials.get("publisherId", "")
-        auth_code.delete()
 
         # Upsert: return the existing valid token for this client+publisher so
         # the AI client keeps the same stable token identity across re-authorisations.

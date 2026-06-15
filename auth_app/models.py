@@ -18,23 +18,6 @@ class OAuthClient(models.Model):
         verbose_name_plural = "OAuth Clients"
 
 
-class OAuthCode(models.Model):
-    """Single-use PKCE authorization code. Valid for 10 minutes, deleted on exchange."""
-
-    code           = models.CharField(max_length=128, unique=True)
-    client_id      = models.CharField(max_length=64, db_index=True)
-    redirect_uri   = models.TextField()
-    code_challenge = models.CharField(max_length=256)
-    credentials    = models.JSONField()
-    expires_at     = models.DateTimeField()
-
-    class Meta:
-        db_table = "oauth_code"
-        ordering = ["-expires_at"]
-        verbose_name = "OAuth Code"
-        verbose_name_plural = "OAuth Codes"
-
-
 class OAuthToken(models.Model):
     """
     Long-lived bearer token issued after successful PKCE auth.
