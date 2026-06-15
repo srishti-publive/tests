@@ -713,7 +713,7 @@ def oauth_userinfo(request: HttpRequest) -> JsonResponse:
     set_txn_name("Auth/userinfo", group="Auth")
     add_attrs([("auth.flow", "userinfo")])
 
-    credentials, _, error_code = resolve_credentials(request)
+    credentials, error_code = resolve_credentials(request)
     if not credentials:
         add_attrs([("auth.result", "failure"), ("auth.failure_reason", error_code or "unauthenticated")])
         return build_unauthorized_response(request, error_code)

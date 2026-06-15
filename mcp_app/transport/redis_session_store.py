@@ -36,14 +36,13 @@ def _session_key(session_id: str) -> str:
     return f"mcp:session:{session_id}"
 
 
-def register_session(session_id: str, credentials: dict, token_expires_at) -> int:
+def register_session(session_id: str, credentials: dict) -> int:
     """Register a newly opened SSE session. Returns the cluster-wide active count
     (including this session) — the admission gate in sse.py rejects and rolls back
     when this exceeds the cap."""
     client  = get_redis_client()
     payload = json.dumps({
-        "credentials":      credentials or {},
-        "token_expires_at": token_expires_at,  # always None today (see auth.py) — JSON-safe as-is
+        "credentials": credentials or {},
     })
     with client.pipeline() as pipe:
         pipe.set(_session_key(session_id), payload, ex=_SESSION_TTL_SECONDS)
@@ -53,9 +52,13 @@ def register_session(session_id: str, credentials: dict, token_expires_at) -> in
     return active_count
 
 
-def get_session(session_id: str) -> Optional[tuple]:
-    """Look up a session's (credentials, token_expires_at) from any process.
-    Returns None if absent, expired, or unparseable (forces a reconnect)."""
+def get_session(session_id: str) -> Optional[dict]:
+    """Look up a session's credentials dict from any process. Returns None if absent,
+    expired, or unparseable (forces a reconnect).
+
+    Tolerates legacy payloads that still carry a `token_expires_at` key (written
+    before it was removed) — only `credentials` is read, so the extra key is ignored
+    until the entry ages out via TTL."""
     client = get_redis_client()
     raw    = client.get(_session_key(session_id))
     if raw is None:
@@ -74,7 +77,7 @@ def get_session(session_id: str) -> Optional[tuple]:
     # Refresh TTL on access so active sessions never expire mid-use (mirrors the
     # in-process dict's lifetime, which was bounded only by the process lifetime).
     client.expire(_session_key(session_id), _SESSION_TTL_SECONDS)
-    return credentials, data.get("token_expires_at")
+    return credentials
 
 
 def close_session(session_id: str) -> int:

@@ -1,9 +1,8 @@
 """Credential resolution and unauthorized-response helpers for MCP requests.
 
-resolve_credentials() returns a 3-tuple:
-    (credentials_dict | None, None, error_code | None)
+resolve_credentials() returns a 2-tuple:
+    (credentials_dict | None, error_code | None)
 
-The second element is always None (tokens do not expire).
 error_code is one of the typed reason codes below — never a generic string.
 """
 import logging
@@ -37,7 +36,7 @@ _CLIENT_NAME_MAP: dict[str, str] = {
 
 
 def resolve_credentials(request):
-    """Return (credentials_dict, token_expires_at, error_code) from Bearer token or session.
+    """Return (credentials_dict, error_code) from Bearer token or session.
 
     Bearer present  →  OAuthToken table (PKCE flow)
     No Bearer       →  Django session with server-side TTL check → SESSION_EXPIRED | credentials
@@ -51,20 +50,20 @@ def resolve_credentials(request):
 
 
 def _resolve_oauth_token(token_value: str):
-    """Resolve an OAuthToken bearer (PKCE flow). Unknown tokens return (None, None, None)."""
+    """Resolve an OAuthToken bearer (PKCE flow). Unknown tokens return (None, None)."""
     try:
         from auth_app.models import OAuthToken
         oauth_token = OAuthToken.objects.get(token=token_value)
         # Merge flat column so downstream clients always see publisherId regardless
         # of whether the stored credentials JSON still contains it (old rows) or not (new rows).
         credentials = {**oauth_token.credentials, "publisherId": oauth_token.publisher_id}
-        return credentials, None, None
+        return credentials, None
     except Exception as exc:  # noqa: BLE001
         from auth_app.models import OAuthToken as _OAuthToken
         if not isinstance(exc, _OAuthToken.DoesNotExist):
             logger.error("resolve_credentials: unexpected OAuthToken lookup failure", exc_info=True)
             raise
-    return None, None, None
+    return None, None
 
 
 def _resolve_session(request):
@@ -72,14 +71,14 @@ def _resolve_session(request):
     from auth_app.services import check_session_ttl, get_session_credentials
     credentials = get_session_credentials(request.session)
     if not credentials:
-        return None, None, None
+        return None, None
 
     if check_session_ttl(request.session):
         if hasattr(request.session, "flush"):
             request.session.flush()
-        return None, None, SESSION_EXPIRED
+        return None, SESSION_EXPIRED
 
-    return credentials, None, None
+    return credentials, None
 
 
 def build_unauthorized_response(request, error_code: Optional[str] = None) -> JsonResponse:

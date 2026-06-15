@@ -174,7 +174,7 @@ def _record_session_protocol(request) -> None:
         add_attrs([("mcp.protocol_version", protocol_version)])
 
 
-def dispatch_jsonrpc(body: dict, credentials: dict, request=None, session_id=None, token_expires_at=None):
+def dispatch_jsonrpc(body: dict, credentials: dict, request=None, session_id=None):
     """Route a single JSON-RPC body to the correct handler and return the response dict."""
     method = body.get("method", "")
     id_    = body.get("id")
@@ -199,8 +199,6 @@ def dispatch_jsonrpc(body: dict, credentials: dict, request=None, session_id=Non
             "capabilities":    {"tools": {}},
             "serverInfo":      {"name": "publive-cds", "version": "1.0.0"},
         }
-        if token_expires_at is not None:
-            result["tokenExpiresAt"] = token_expires_at.isoformat()
         return jsonrpc_ok(id_, result)
 
     # ── tools/list ────────────────────────────────────────────────────────────

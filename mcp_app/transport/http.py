@@ -22,7 +22,7 @@ def _add_session_protocol_attrs(request) -> None:
 
 
 @newrelic.agent.function_trace(name="handle_http_request", group="Transport")
-def handle_http_request(request, credentials: dict, token_expires_at) -> HttpResponse:
+def handle_http_request(request, credentials: dict) -> HttpResponse:
     """Process a single stateless POST /mcp request (Streamable HTTP transport)."""
     request_size   = len(request.body)
     active_threads = threading.active_count()
@@ -48,14 +48,14 @@ def handle_http_request(request, credentials: dict, token_expires_at) -> HttpRes
             logger.debug("MCP batch request: count=%d session=%s", len(body), session_id)
             responses = [
                 r for r in (
-                    dispatch_jsonrpc(msg, credentials, request, session_id, token_expires_at)
+                    dispatch_jsonrpc(msg, credentials, request, session_id)
                     for msg in body
                 )
                 if r is not None
             ]
             return JsonResponse(responses, safe=False) if responses else HttpResponse(status=202)
 
-        response = dispatch_jsonrpc(body, credentials, request, session_id, token_expires_at)
+        response = dispatch_jsonrpc(body, credentials, request, session_id)
         if response is None:
             return HttpResponse(status=202)
         return JsonResponse(response)

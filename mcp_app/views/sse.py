@@ -4,9 +4,9 @@ import newrelic.agent
 from mcp_app.transport.sse import handle_sse_message, open_sse_connection
 
 
-def sse_open(request, credentials: dict, token_expires_at):
+def sse_open(request, credentials: dict):
     """GET /mcp — open a long-lived SSE stream. Called by the router after auth."""
-    return open_sse_connection(request, credentials, token_expires_at)
+    return open_sse_connection(request, credentials)
 
 
 @csrf_exempt

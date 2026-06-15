@@ -8,7 +8,7 @@ from mcp_app.transport.http import handle_http_request
 logger = logging.getLogger(__name__)
 
 
-def http_mcp(request, credentials: dict, token_expires_at):
+def http_mcp(request, credentials: dict):
     """POST /mcp — stateless Streamable HTTP transport. Called by the router after auth."""
     content_type = request.META.get("CONTENT_TYPE", "")
     if "application/json" not in content_type:
@@ -24,4 +24,4 @@ def http_mcp(request, credentials: dict, token_expires_at):
             },
             status=415,
         )
-    return handle_http_request(request, credentials, token_expires_at)
+    return handle_http_request(request, credentials)

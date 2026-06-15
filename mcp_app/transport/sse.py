@@ -72,7 +72,7 @@ def _add_session_protocol_attrs(request) -> None:
 
 # ── SSE connection ────────────────────────────────────────────────────────────
 
-def open_sse_connection(request, credentials: dict, token_expires_at):
+def open_sse_connection(request, credentials: dict):
     """Open a long-lived SSE session; stream messages to the client until disconnect."""
     session_id       = str(uuid.uuid4())
     publisher_id     = (credentials or {}).get("publisherId", "unknown")
@@ -95,7 +95,7 @@ def open_sse_connection(request, credentials: dict, token_expires_at):
         session_id, publisher_id, active_threads,
     )
 
-    active_on_open = register_session(session_id, credentials, token_expires_at)
+    active_on_open = register_session(session_id, credentials)
 
     # Admission gate — register first (SADD+SCARD is atomic in one pipeline),
     # then roll back if this connection pushed the count over the cap. Rejecting
@@ -274,7 +274,7 @@ def handle_sse_message(request) -> HttpResponse:
         })
         return JsonResponse({"error": "No active MCP session."}, status=400)
 
-    credentials, token_expires_at = session_entry
+    credentials = session_entry
 
     session_trace_id = get_field(session_id, "session_trace_id") or ""
     if session_trace_id:
@@ -293,7 +293,7 @@ def handle_sse_message(request) -> HttpResponse:
             add_attrs([("mcp.session_tool_seq", seq)])
 
     try:
-        response_msg = dispatch_jsonrpc(body, credentials, request, session_id, token_expires_at)
+        response_msg = dispatch_jsonrpc(body, credentials, request, session_id)
 
         if (
             body_method == "tools/call"

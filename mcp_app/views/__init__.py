@@ -26,7 +26,7 @@ def mcp_endpoint(request):
         request.META.get("HTTP_USER_AGENT", "unknown")[:80],
     )
 
-    credentials, token_expires_at, error_code = resolve_credentials(request)
+    credentials, error_code = resolve_credentials(request)
     if error_code or not credentials:
         logger.warning(
             "MCP authentication failed: method=%s has_bearer=%s error_code=%s",
@@ -37,9 +37,9 @@ def mcp_endpoint(request):
     logger.info("MCP authenticated: method=%s", request.method)
 
     if request.method == "GET":
-        return sse_open(request, credentials, token_expires_at)
+        return sse_open(request, credentials)
 
     if request.method == "POST":
-        return http_mcp(request, credentials, token_expires_at)
+        return http_mcp(request, credentials)
 
     return HttpResponse(status=405)
