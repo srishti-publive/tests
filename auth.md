@@ -68,25 +68,44 @@ The server has two large responsibilities:
 
 ## 2. Boot Flow
 
-### Local development
+### Local development (Redis runs as a separate process)
 
-Command:
+Locally you start Redis yourself, then run the dev server against it. The local
+settings module does **not** enforce the production REDIS_URL guard, but the app
+still needs a reachable Redis for the cache, SSE sessions, queues, and stats.
+
+Commands:
 
 ```bash
+redis-server                 # separate terminal, or: brew services start redis
+python manage.py migrate
 python manage.py runserver
 ```
 
 Flow:
 
 ```text
+redis-server
+  -> listens on redis://127.0.0.1:6379/0 (the REDIS_URL default)
+
 manage.py
   -> sets DJANGO_SETTINGS_MODULE to publive_mcp.settings
   -> publive_mcp/settings/__init__.py selects local or prod settings
      from RAILWAY_ENVIRONMENT or DJANGO_ENV
   -> django.core.management.execute_from_command_line()
   -> Django loads settings, URLs, middleware, apps
-  -> development server starts
+  -> development server starts and connects to the local Redis
 ```
+
+Local notes:
+
+- `DJANGO_ENV=local` (or unset) selects `publive_mcp/settings/local.py`, which
+  sets `DEBUG = True` and `RATE_LIMIT_ENABLED = False`.
+- `REDIS_URL` defaults to `redis://127.0.0.1:6379/0`, so a plain `redis-server`
+  needs no extra configuration.
+- With no `DATABASE_URL`, the database falls back to local SQLite.
+- `docker compose up` is the alternative: it starts Postgres + Redis + the web
+  server together so you do not run Redis by hand.
 
 Important local commands:
 
@@ -97,17 +116,23 @@ python manage.py test
 python manage.py collectstatic --noinput
 ```
 
-### Production/Railway
+### Production/Railway (Redis bundled inside the image)
+
+In production there is no separate Redis service. The Docker image installs and
+runs its own `redis-server`, started by `entrypoint.sh` before gunicorn, so the
+deployed container is self-contained.
 
 Docker build:
 
 ```text
 Dockerfile
   -> python:3.12-slim
+  -> apt-get install libpq-dev, gcc, redis-server
   -> install requirements
   -> copy source
   -> set DJANGO_SETTINGS_MODULE=publive_mcp.settings.prod
-  -> collectstatic
+  -> collectstatic (with a build-only REDIS_URL placeholder so the prod guard
+     does not trip; it is not an ENV, so it never reaches the running container)
   -> set CMD to /app/entrypoint.sh
 ```
 
@@ -115,6 +140,8 @@ Container start:
 
 ```text
 entrypoint.sh
+  -> redis-server --daemonize yes --save "" --appendonly no   (in-container Redis)
+  -> export REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}   (external value wins)
   -> python manage.py migrate --noinput
   -> python manage.py showmigrations auth_app
   -> gunicorn publive_mcp.wsgi -w 1 --threads 4 -b 0.0.0.0:${PORT:-8000}
@@ -137,13 +164,26 @@ publive_mcp/settings/prod.py
   -> refuses to boot if REDIS_URL is missing
 ```
 
-Redis is required in production because it backs:
+The guard is satisfied at runtime because `entrypoint.sh` exports `REDIS_URL`
+(pointing at the bundled Redis) before any Django command runs. You no longer
+have to provision a Railway Redis instance for the container to boot.
+
+Redis still backs the same state, now served from inside the container:
 
 - SSE session registry
 - Per-session SSE message queues
 - Per-session MCP stats
 - Prompt event rate-limit counters
 - Django cache rate limits
+
+Two consequences of in-container Redis:
+
+- It is **ephemeral** (`--save "" --appendonly no`): SSE state and rate-limit
+  counters reset on redeploy. Durable login sessions and OAuth tokens are in
+  Postgres, so this is safe.
+- It is **per-container**, not shared across replicas — so stay single-container
+  / `-w 1`. To scale out, point `REDIS_URL` at an external shared Redis (that
+  value wins and the bundled one is ignored).
 
 ---
 
@@ -1909,10 +1949,12 @@ Required:
 DJANGO_SECRET_KEY
 ```
 
-Production required:
+Production:
 
 ```text
-REDIS_URL
+REDIS_URL   prod.py refuses to boot without it, but entrypoint.sh sets it to the
+            bundled in-container Redis by default. Only set it yourself to point
+            at an external/shared Redis (e.g. when running multiple replicas).
 ```
 
 Common:
