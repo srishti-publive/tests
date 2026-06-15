@@ -1,13 +1,17 @@
 #!/bin/sh
 
-# Start the in-container Redis. Data is ephemeral (no RDB/AOF persistence) — it
-# backs SSE sessions, message queues, stats and rate limits, all of which are
-# fine to lose on restart (durable sessions live in Postgres). An externally
-# provided REDIS_URL still wins if one is set.
-echo "[entrypoint] starting redis-server (in-container)..."
-redis-server --daemonize yes --save "" --appendonly no
-export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-echo "[entrypoint] REDIS_URL=${REDIS_URL}"
+# Prefer an externally-provided REDIS_URL (e.g. a Railway Redis service) — shared
+# across all workers/replicas. Only when it's absent do we fall back to an
+# ephemeral in-container redis-server (local/standalone runs); its data is fine to
+# lose on restart since durable sessions live in Postgres. We never echo the URL —
+# it carries credentials.
+if [ -z "${REDIS_URL}" ]; then
+    echo "[entrypoint] no REDIS_URL set — starting ephemeral in-container redis-server..."
+    redis-server --daemonize yes --save "" --appendonly no
+    export REDIS_URL="redis://127.0.0.1:6379/0"
+else
+    echo "[entrypoint] using external REDIS_URL (in-container redis-server not started)"
+fi
 
 echo "[entrypoint] DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE}"
 echo "[entrypoint] applying migrations..."
