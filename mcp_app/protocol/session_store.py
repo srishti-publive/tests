@@ -2,10 +2,8 @@
 
 Re-exports `mcp_app.protocol.session_stats` under the names `dispatch.py`/`sse.py`
 already import, keeping their diffs to call-site mechanics rather than import
-churn. Previously an in-process dict (`_stats`) guarded by a `threading.Lock`
-(then a Redis hash); both are now the `SessionStats`/`SessionToolEvent` models,
-which let any worker read/update any session's stats, with atomic F() increments
-replacing the old lock-protected read-modify-write for counters.
+churn. Stats live in the `SessionStats`/`SessionToolEvent` models, which let any
+worker read/update any session's stats, with atomic F() increments for counters.
 """
 from mcp_app.protocol.session_stats import (  # noqa: F401 — re-exported for callers
     append_tool_sequence,

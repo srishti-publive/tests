@@ -1,10 +1,10 @@
 """Database models backing the MCP transport layer.
 
-These replace the former Redis-backed state (session registry, per-session message
-queue, session stats, tool sequence). Living in the database means the data is
-shared across every gunicorn worker/replica — the property that previously
-required Redis — so `GET /mcp` and `POST /mcp/message` for the same session can
-land on different processes and still find each other.
+These hold the cross-process transport state (session registry, per-session
+message queue, session stats, tool sequence). Living in the database means the
+data is shared across every gunicorn worker/replica, so `GET /mcp` and
+`POST /mcp/message` for the same session can land on different processes and
+still find each other.
 
 Most rows live until explicitly deleted (message delivery, code redemption).
 `SSESession` is the exception: it carries a `last_seen` heartbeat so streams that
@@ -16,8 +16,7 @@ from django.db import models
 
 
 class SSESession(models.Model):
-    """An open SSE session and its live CDS/CMS credentials. Replaces the Redis
-    `mcp:session:{id}` string + `mcp:active_sessions` set."""
+    """An open SSE session and its live CDS/CMS credentials."""
 
     session_id       = models.CharField(max_length=64, unique=True, db_index=True)
     credentials      = models.JSONField(default=dict)
@@ -35,7 +34,7 @@ class SSESession(models.Model):
 
 class SSEMessage(models.Model):
     """A queued JSON-RPC response awaiting delivery on a session's SSE stream.
-    FIFO by auto-increment `id`. Replaces the Redis `mcp:session_queue:{id}` list."""
+    FIFO by auto-increment `id`."""
 
     session_id  = models.CharField(max_length=64, db_index=True)
     payload     = models.JSONField()
@@ -47,8 +46,8 @@ class SSEMessage(models.Model):
 
 
 class SessionStats(models.Model):
-    """Per-SSE-session telemetry. Replaces the Redis `mcp:session_stats:{id}` hash.
-    Counters are updated atomically via F() expressions in `protocol/session_stats`."""
+    """Per-SSE-session telemetry. Counters are updated atomically via F()
+    expressions in `protocol/session_stats`."""
 
     session_id                    = models.CharField(max_length=64, unique=True, db_index=True)
     tool_count                    = models.IntegerField(default=0)
@@ -69,8 +68,7 @@ class SessionStats(models.Model):
 
 
 class SessionToolEvent(models.Model):
-    """One entry in a session's ordered tool-call sequence. Replaces the Redis
-    `mcp:session_stats:{id}:tool_sequence` list."""
+    """One entry in a session's ordered tool-call sequence."""
 
     session_id = models.CharField(max_length=64, db_index=True)
     tool_name  = models.CharField(max_length=255)

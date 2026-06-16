@@ -1,9 +1,8 @@
-"""Database-backed SSE session registry (was Redis `mcp:session:*`).
+"""Database-backed SSE session registry.
 
 `GET /mcp` (open) and `POST /mcp/message` (route) can land on different
 processes/replicas and still find the session, because the registry lives in the
-shared database. Replaces the former in-process `_sse_sessions` dict and its
-Redis successor.
+shared database.
 
 Liveness is tracked by the `last_seen` heartbeat, refreshed on every keepalive
 (`touch_session`). A session that dies without a clean close (TCP reset, worker

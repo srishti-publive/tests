@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # All cross-worker state (SSE sessions, message queues, session stats, rate limits)
-# is database-backed now — no Redis to start. The only runtime dependency is the
-# database (DATABASE_URL on Railway; SQLite locally).
+# is database-backed. The only runtime dependency is the database
+# (DATABASE_URL on Railway; SQLite locally).
 
 echo "[entrypoint] DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE}"
 echo "[entrypoint] applying migrations..."

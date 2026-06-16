@@ -16,11 +16,10 @@ Current code inventory:
 - Total tool schemas in code: 69
 - Main MCP protocol version returned by the server: `2024-11-05`
 
-Note: older docs in the repository may mention 61 tools, in-memory SSE state, or
-Redis. The current code is database-backed: dedicated models for SSE sessions, SSE
+Note: older docs in the repository may mention 61 tools or in-memory SSE state.
+The current code is database-backed: dedicated models for SSE sessions, SSE
 queues, session stats, and single-use OAuth codes, plus Django `DatabaseCache` for
-prompt rate limits and HTTP rate limits. Redis has been removed entirely (any
-"Redis State Deep Dive" section below is superseded).
+prompt rate limits and HTTP rate limits.
 
 ---
 
@@ -54,7 +53,7 @@ mcp_app/
   cms/                    CMS tools
   clients/                Publive CDS/CMS HTTP clients
   middleware.py           Rate limiting, request id, security headers
-  redis_client.py         Shared raw redis-py client
+  models.py               SSE session/queue/stats DB models
   nr_utils.py             New Relic wrappers
   prompt_capture.py       Prompt extraction and observability
 ```
@@ -70,16 +69,14 @@ The server has two large responsibilities:
 
 ## 2. Boot Flow
 
-### Local development (Redis runs as a separate process)
+### Local development
 
-Locally you start Redis yourself, then run the dev server against it. The local
-settings module does **not** enforce the production REDIS_URL guard, but the app
-still needs a reachable Redis for the cache, SSE sessions, queues, and stats.
+The only runtime dependency is the database. With no `DATABASE_URL`, the database
+falls back to local SQLite, so a bare checkout runs with no extra services.
 
 Commands:
 
 ```bash
-redis-server                 # separate terminal, or: brew services start redis
 python manage.py migrate
 python manage.py runserver
 ```
@@ -87,27 +84,22 @@ python manage.py runserver
 Flow:
 
 ```text
-redis-server
-  -> listens on redis://127.0.0.1:6379/0 (the REDIS_URL default)
-
 manage.py
   -> sets DJANGO_SETTINGS_MODULE to publive_mcp.settings
   -> publive_mcp/settings/__init__.py selects local or prod settings
      from RAILWAY_ENVIRONMENT or DJANGO_ENV
   -> django.core.management.execute_from_command_line()
   -> Django loads settings, URLs, middleware, apps
-  -> development server starts and connects to the local Redis
+  -> development server starts
 ```
 
 Local notes:
 
 - `DJANGO_ENV=local` (or unset) selects `publive_mcp/settings/local.py`, which
   sets `DEBUG = True` and `RATE_LIMIT_ENABLED = False`.
-- `REDIS_URL` defaults to `redis://127.0.0.1:6379/0`, so a plain `redis-server`
-  needs no extra configuration.
 - With no `DATABASE_URL`, the database falls back to local SQLite.
-- `docker compose up` is the alternative: it starts Postgres + Redis + the web
-  server together so you do not run Redis by hand.
+- All cross-worker state (SSE sessions, message queues, session stats, rate
+  limits) lives in the database, so nothing else needs to be running.
 
 Important local commands:
 
@@ -118,23 +110,21 @@ python manage.py test
 python manage.py collectstatic --noinput
 ```
 
-### Production/Railway (Redis bundled inside the image)
+### Production/Railway
 
-In production there is no separate Redis service. The Docker image installs and
-runs its own `redis-server`, started by `entrypoint.sh` before gunicorn, so the
-deployed container is self-contained.
+In production the only hard dependency is the database (`DATABASE_URL`). There is
+no separate cache/queue service to provision.
 
 Docker build:
 
 ```text
 Dockerfile
   -> python:3.12-slim
-  -> apt-get install libpq-dev, gcc, redis-server
+  -> apt-get install libpq-dev, gcc
   -> install requirements
   -> copy source
   -> set DJANGO_SETTINGS_MODULE=publive_mcp.settings.prod
-  -> collectstatic (with a build-only REDIS_URL placeholder so the prod guard
-     does not trip; it is not an ENV, so it never reaches the running container)
+  -> collectstatic
   -> set CMD to /app/entrypoint.sh
 ```
 
@@ -142,11 +132,9 @@ Container start:
 
 ```text
 entrypoint.sh
-  -> redis-server --daemonize yes --save "" --appendonly no   (in-container Redis)
-  -> export REDIS_URL=${REDIS_URL:-redis://127.0.0.1:6379/0}   (external value wins)
   -> python manage.py migrate --noinput
-  -> python manage.py showmigrations auth_app
-  -> gunicorn publive_mcp.wsgi -w 1 --threads 4 -b 0.0.0.0:${PORT:-8000}
+  -> python manage.py createcachetable   (DatabaseCache table, idempotent)
+  -> gunicorn publive_mcp.wsgi -w ${WEB_CONCURRENCY:-2} --threads ${GUNICORN_THREADS:-4} -b 0.0.0.0:${PORT:-8000}
 ```
 
 WSGI:
@@ -157,35 +145,26 @@ publive_mcp/wsgi.py
   -> newrelic.agent.WSGIApplicationWrapper(...)
 ```
 
-Production setting guard:
+Production settings:
 
 ```text
 publive_mcp/settings/prod.py
   -> DEBUG = False
   -> SESSION_COOKIE_SECURE = True
-  -> refuses to boot if REDIS_URL is missing
 ```
 
-The guard is satisfied at runtime because `entrypoint.sh` exports `REDIS_URL`
-(pointing at the bundled Redis) before any Django command runs. You no longer
-have to provision a Railway Redis instance for the container to boot.
-
-Redis still backs the same state, now served from inside the container:
+All cross-worker state is database-backed, so it is shared across every gunicorn
+worker/replica through `DATABASE_URL`:
 
 - SSE session registry
 - Per-session SSE message queues
 - Per-session MCP stats
 - Prompt event rate-limit counters
-- Django cache rate limits
+- Django cache (`DatabaseCache`) rate limits
 
-Two consequences of in-container Redis:
-
-- It is **ephemeral** (`--save "" --appendonly no`): SSE state and rate-limit
-  counters reset on redeploy. Durable login sessions and OAuth tokens are in
-  Postgres, so this is safe.
-- It is **per-container**, not shared across replicas — so stay single-container
-  / `-w 1`. To scale out, point `REDIS_URL` at an external shared Redis (that
-  value wins and the bundled one is ignored).
+Because the state is in the shared database rather than per-process, you can run
+multiple workers *and* multiple replicas (separate containers) — they all see the
+same sessions, queues, stats, and rate limits.
 
 ---
 
@@ -264,7 +243,7 @@ mcp_app.middleware.SecurityHeadersMiddleware
      Permissions-Policy
 
 mcp_app.middleware.RateLimitMiddleware
-  -> applies sliding-window request limits using Django cache/Redis
+  -> applies sliding-window request limits using Django cache (DatabaseCache)
 ```
 
 `django.middleware.csrf.CsrfViewMiddleware` is not configured in
@@ -968,12 +947,12 @@ Django URL router
 ```
 
 The actual JSON-RPC response is not returned directly from `/mcp/message`.
-Instead it is pushed into the Redis queue and delivered over the still-open SSE
-stream.
+Instead it is pushed into the database-backed message queue and delivered over the
+still-open SSE stream.
 
 `POST /mcp/message` does not run `resolve_credentials()` again. The opaque
 `sessionId` from the initial authenticated `GET /mcp` is the lookup key for the
-Redis session entry that contains credentials. Because this POST usually has no
+`SSESession` row that contains credentials. Because this POST usually has no
 Bearer token, the `/mcp` rate-limit rule falls back to the client IP for SSE
 message posts.
 
@@ -990,28 +969,27 @@ event_stream() finally block
   -> emit New Relic session summary events
 ```
 
-### Redis objects used by SSE
+### Database models used by SSE
 
 ```text
-mcp:session:<session_id>
-  -> credentials and token_expires_at
+SSESession        (table mcp_sse_session)
+  -> one row per open session: credentials + last_seen heartbeat
+     (the set of live rows is the active-session set)
 
-mcp:active_sessions
-  -> Redis set of active session IDs
+SSEMessage        (table mcp_sse_message)
+  -> pending JSON-RPC responses, FIFO by auto-increment id
 
-mcp:session_queue:<session_id>
-  -> Redis list of pending JSON-RPC responses
+SessionStats      (table mcp_session_stats)
+  -> per-session counters and timings
 
-mcp:session_stats:<session_id>
-  -> Redis hash for counters and timings
-
-mcp:session_stats:<session_id>:tool_sequence
-  -> Redis list of tool names executed in the session
+SessionToolEvent  (table mcp_session_tool_event)
+  -> ordered tool names executed in the session (tool_sequence)
 ```
 
-The Redis session, queue, and stats keys have a 24 hour safety-net TTL. Session
-and stats TTLs refresh while the session is active; close cleanup still deletes
-the keys immediately on normal disconnect.
+`SSESession` carries a `last_seen` heartbeat: a stream that dies without a clean
+close goes stale after `MCP_SSE_SESSION_TTL_SECONDS` and is pruned lazily on the
+next `register_session`. Close cleanup deletes the session, queue, and stats rows
+immediately on normal disconnect.
 
 ---
 
@@ -1154,7 +1132,7 @@ update/delete tools:
   -> 100 per SSE session
 ```
 
-For stateless HTTP, no Redis stats entry exists, so the per-session SSE write
+For stateless HTTP, no `SessionStats` row exists, so the per-session SSE write
 counter no-ops.
 
 ---
@@ -1630,22 +1608,17 @@ session_ttl_seconds
 
 ---
 
-## 16. Redis State Deep Dive
+## 16. Database State Deep Dive
 
-Raw Redis client:
-
-```text
-mcp_app/redis_client.py
-  -> get_redis_client()
-  -> redis.Redis.from_url(REDIS_URL, decode_responses=True)
-```
+All cross-process state lives in the database (models in `mcp_app/models.py`),
+shared across every worker/replica through `DATABASE_URL`.
 
 ### SSE session store
 
 File:
 
 ```text
-mcp_app/transport/redis_session_store.py
+mcp_app/transport/session_registry.py
 ```
 
 Functions:
@@ -1653,6 +1626,7 @@ Functions:
 ```text
 register_session()
 get_session()
+touch_session()
 close_session()
 ```
 
@@ -1661,6 +1635,7 @@ Purpose:
 ```text
 Allows GET /mcp and POST /mcp/message for the same session to land on different
 gunicorn threads, workers, or replicas and still find the session credentials.
+Liveness is tracked by the SSESession.last_seen heartbeat; stale rows are pruned.
 ```
 
 ### SSE message queue
@@ -1668,7 +1643,7 @@ gunicorn threads, workers, or replicas and still find the session credentials.
 File:
 
 ```text
-mcp_app/transport/redis_message_queue.py
+mcp_app/transport/message_queue.py
 ```
 
 Functions:
@@ -1683,8 +1658,9 @@ queue_depth()
 Purpose:
 
 ```text
-POST /mcp/message pushes a JSON-RPC response into Redis.
-The open GET /mcp SSE stream blocks on BLPOP and sends that response to the client.
+POST /mcp/message inserts a JSON-RPC response row (SSEMessage). The open GET /mcp
+SSE stream polls the queue table (no blocking-pop primitive), atomically claims
+and deletes the oldest row, and sends that response to the client.
 ```
 
 ### Session stats
@@ -1692,7 +1668,7 @@ The open GET /mcp SSE stream blocks on BLPOP and sends that response to the clie
 File:
 
 ```text
-mcp_app/protocol/redis_session_stats.py
+mcp_app/protocol/session_stats.py
 ```
 
 Functions:
@@ -1711,7 +1687,8 @@ Purpose:
 
 ```text
 Tracks tool counts, error counts, degraded counts, duration, estimated tokens,
-client name, trace id, and per-session write buckets.
+client name, trace id, and per-session write buckets (SessionStats /
+SessionToolEvent). Counters are incremented atomically via F() expressions.
 ```
 
 ### Prompt event rate limit
@@ -1726,7 +1703,7 @@ Function:
 
 ```text
 should_emit_prompt_event()
-  -> Redis key mcp:prompt_events:<minute_bucket>
+  -> Django cache (DatabaseCache) key mcp:prompt_events:<minute_bucket>
   -> max 1000 prompt events per minute cluster-wide
 ```
 
@@ -1890,23 +1867,23 @@ Client
   -> resolve_credentials()
   -> sse_open()
   -> open_sse_connection()
-  -> register_session() in Redis
-  -> init_stats() in Redis
+  -> register_session() in the database
+  -> init_stats() in the database
   <- SSE event: endpoint /mcp/message?sessionId=<uuid>
 
 Client
   -> POST /mcp/message?sessionId=<uuid>
   -> sse_message()
   -> handle_sse_message()
-  -> get_session() from Redis
+  -> get_session() from the database
   -> dispatch_jsonrpc()
   -> _handle_tool_call()
   -> dispatch_cds_tool() or dispatch_cms_tool()
-  -> push_message() into Redis queue
+  -> push_message() into the queue table
   <- { "ok": true }
 
 Open SSE stream
-  -> pop_message() from Redis queue
+  -> pop_message() from the queue table
   <- event: message with JSON-RPC response
 
 Client disconnects
@@ -1954,9 +1931,7 @@ DJANGO_SECRET_KEY
 Production:
 
 ```text
-REDIS_URL   prod.py refuses to boot without it, but entrypoint.sh sets it to the
-            bundled in-container Redis by default. Only set it yourself to point
-            at an external/shared Redis (e.g. when running multiple replicas).
+DATABASE_URL   the only hard prod dependency; backs all cross-worker state.
 ```
 
 Common:
@@ -1980,7 +1955,6 @@ Defaults:
 BASE_URL=http://localhost:8000
 CDS_BASE_URL=https://cds-beta.thepublive.com/publisher/{publisher_id}
 CMS_BASE_URL=https://cms-beta.thepublive.com/publisher/{publisher_id}
-REDIS_URL=redis://127.0.0.1:6379/0
 MCP_QUEUE_MAXSIZE=100
 MCP_MAX_SSE_SESSIONS=2
 ```
@@ -2016,11 +1990,11 @@ Rate limiting
 Security headers
   -> applied to HTML responses
 
-Redis-backed SSE session admission gate
+Database-backed SSE session admission gate
   -> avoids too many long-lived streams occupying gunicorn threads
 
 SSE sessionId lookup
-  -> /mcp/message uses the Redis session created by authenticated GET /mcp
+  -> /mcp/message uses the SSESession row created by authenticated GET /mcp
 
 CMS write dry-run and confirmation rules
   -> protects create/update/delete workflows
@@ -2031,9 +2005,9 @@ Credential storage notes:
 - OAuth tokens are stored in the database.
 - OAuth token credentials are stored as JSON.
 - Browser session credentials are stored in Django sessions.
-- SSE credentials are stored in Redis for the lifetime of the SSE session.
+- SSE credentials are stored in the `SSESession` row for the lifetime of the SSE session.
 - Treat SSE `sessionId` values as bearer-like secrets for that stream lifetime.
-- Redis and database access must be network-protected in production.
+- Database access must be network-protected in production.
 
 ---
 
@@ -2084,12 +2058,12 @@ build_base_url()
 build_basic_auth_headers()
 ```
 
-### Redis helpers
+### Session/queue/stats helpers (database-backed)
 
 ```text
-get_redis_client()
 register_session()
 get_session()
+touch_session()
 close_session()
 push_message()
 pop_message()

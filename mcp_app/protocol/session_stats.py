@@ -1,11 +1,9 @@
-"""Database-backed per-SSE-session telemetry (was a Redis hash + list).
+"""Database-backed per-SSE-session telemetry.
 
 Stores tool counts, timing, token estimates, and rate-limit buckets in the
 `SessionStats` row, plus an ordered `SessionToolEvent` list for `tool_sequence`.
-Living in the shared database lets any worker read/update any session's stats —
-the property that previously needed Redis. Counters are incremented atomically at
-the DB level via F() expressions, replacing the old lock-protected
-read-modify-write.
+Living in the shared database lets any worker read/update any session's stats.
+Counters are incremented atomically at the DB level via F() expressions.
 
 Only SSE sessions call `init_stats`; HTTP stateless sessions never do, so every
 function here no-ops (returns None/False/{}) when no row exists — mirroring the

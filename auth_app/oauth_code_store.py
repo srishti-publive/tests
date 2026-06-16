@@ -2,8 +2,8 @@
 
 Authorization codes are minted at ``/oauth/authorize`` and redeemed once at
 ``/oauth/token``. Backed by the ``OAuthAuthorizationCode`` model. Single-use is
-enforced by an atomic select-for-update-then-delete (replacing Redis ``GETDEL``).
-There is no expiry/TTL: a code lives until it is redeemed, then it is deleted.
+enforced by an atomic select-for-update-then-delete. There is no expiry/TTL: a
+code lives until it is redeemed, then it is deleted.
 """
 from typing import Optional
 

@@ -1,4 +1,4 @@
-"""Database-backed per-session message queue (was a Redis list + BLPOP).
+"""Database-backed per-session message queue.
 
 `handle_sse_message` (on whichever process received the POST) inserts the JSON-RPC
 response; the `event_stream` generator (on whichever process holds the GET stream
@@ -6,8 +6,8 @@ response; the `event_stream` generator (on whichever process holds the GET strea
 that lets GET and POST land on different processes.
 
 A database has no blocking-pop primitive, so `pop_message` polls every
-`_POLL_INTERVAL` seconds up to its timeout — replacing Redis `BLPOP(timeout)`.
-Each poll grabs the oldest row with `select_for_update(skip_locked=True)` and
+`_POLL_INTERVAL` seconds up to its timeout. Each poll grabs the oldest row with
+`select_for_update(skip_locked=True)` and
 deletes it in the same transaction, so two workers never deliver the same message
 (on Postgres; `select_for_update` is a harmless no-op on SQLite, where local dev
 is single-process anyway).

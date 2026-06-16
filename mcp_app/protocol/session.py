@@ -42,9 +42,9 @@ def should_emit_prompt_event() -> bool:
 
     Fixed window keyed by the current UTC minute. `cache.add` seeds the bucket with
     a generous TTL (2x the window, so a bucket always self-expires) only on the
-    first call; `cache.incr` then bumps the shared (DatabaseCache) counter. Unlike
-    Redis INCR this read-modify-write isn't strictly atomic across workers, so the
-    count can drift by a few under heavy concurrency — acceptable for a coarse
+    first call; `cache.incr` then bumps the shared (DatabaseCache) counter. This
+    read-modify-write isn't strictly atomic across workers, so the count can drift
+    by a few under heavy concurrency — acceptable for a coarse
     cost-control gate that errs toward emitting, not dropping.
     """
     bucket = int(time.time() // 60)

@@ -43,8 +43,8 @@ class OAuthAuthorizationCode(models.Model):
     Single-use OAuth 2.0 PKCE authorization code: minted at /oauth/authorize,
     redeemed once at /oauth/token, then deleted.
 
-    Replaces the prior Redis store (GETDEL). Single-use is enforced by an atomic
-    select-for-update-then-delete in oauth_code_store.pop_code. There is no expiry:
+    Single-use is enforced by an atomic select-for-update-then-delete in
+    oauth_code_store.pop_code. There is no expiry:
     a code lives until it is redeemed (then deleted). credentials stores
     {publisherId, apiKey, apiSecret}.
     """
