@@ -90,9 +90,9 @@ SCHEMAS = [
         "name": "update_post",
         "description": (
             "Update an existing post. "
-            "SETTING STATUS TO DRAFT: updates immediately — no dry_run step needed. "
-            "ALL OTHER UPDATES: dry_run=true (default) shows a field-by-field diff — no changes made. "
-            "PUBLISHING: also requires confirm_publish=true together with dry_run=false. "
+            "DRAFT POSTS: if the post is currently a Draft (or you are setting status=Draft), the update applies immediately — no dry_run step. "
+            "LIVE POSTS (Published, Scheduled, Approval Pending — including edits to an already-live post): dry_run=true (default) shows a field-by-field diff — no changes made. "
+            "PUBLISHING (status=Published): also requires confirm_publish=true together with dry_run=false. "
             "Cannot be changed after creation: english_title, type, slug."
         ),
         "inputSchema": {
@@ -321,6 +321,11 @@ def create_post(credentials: dict, args: dict):
     return patch_result
 
 
+def _is_draft_status(status) -> bool:
+    """True if a status value represents Draft (case/space tolerant)."""
+    return isinstance(status, str) and status.strip().lower() == "draft"
+
+
 def update_post(credentials: dict, args: dict):
     dry_run         = args.get("dry_run", True)
     confirm_publish = args.get("confirm_publish", False)
@@ -330,13 +335,28 @@ def update_post(credentials: dict, args: dict):
     _coerce_post_int_fields(changes)
     _strip_list_brackets(changes)
 
-    if changes.get("status") == "Draft":
+    # Decide on the post's *effective* status: the incoming status if the caller is
+    # changing it, otherwise the post's current status (costs one GET). Only "live"
+    # statuses (Published/Scheduled/Approval Pending) go through dry_run — a Draft,
+    # whether it stays a draft or is being set to one, is written immediately with no
+    # preview. Editing an already-live post still previews (effective status is live).
+    current = None
+    if "status" in changes:
+        effective_status = changes["status"]
+    else:
+        current = cms_get(credentials, f"/post/{post_id}/")
+        if isinstance(current, dict) and "error_type" in current:
+            return current
+        effective_status = current.get("status") if isinstance(current, dict) else None
+
+    if _is_draft_status(effective_status):
         return cms_patch(credentials, f"/post/{post_id}/", changes)
 
     if dry_run:
-        current = cms_get(credentials, f"/post/{post_id}/")
-        if "error_type" in current:
-            return current
+        if current is None:
+            current = cms_get(credentials, f"/post/{post_id}/")
+            if isinstance(current, dict) and "error_type" in current:
+                return current
         return {"dry_run": True, "preview": preview_update_op("Post", post_id, current, changes)}
 
     if changes.get("status") == "Published" and not confirm_publish:
