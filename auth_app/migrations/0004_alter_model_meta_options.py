@@ -18,7 +18,7 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.AlterModelOptions(
-            name="oauthcode",
+            name="OAuth_Pkce_Code",
             options={
                 "db_table": "oauth_code",
                 "ordering": ["-expires_at"],

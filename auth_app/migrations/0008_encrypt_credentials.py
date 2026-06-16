@@ -53,7 +53,7 @@ class Migration(migrations.Migration):
         ),
         # 2. Change credentials column types from JSONField to TextField (TEXT)
         migrations.AlterField(
-            model_name="oauthcode",
+            model_name="OAuth_Pkce_Code",
             name="credentials",
             field=models.TextField(),
         ),
