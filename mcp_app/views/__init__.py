@@ -7,7 +7,6 @@ import newrelic.agent
 
 from mcp_app.protocol.auth import build_unauthorized_response, identify_mcp_client, resolve_credentials
 from mcp_app.views.http import http_mcp
-from mcp_app.views.sse import sse_open
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 @csrf_exempt
 @newrelic.agent.function_trace(name="mcp_endpoint", group="Transport")
 def mcp_endpoint(request):
-    """Single entry point for GET /mcp (SSE) and POST /mcp (HTTP).
+    """Single entry point for POST /mcp (Streamable HTTP).
     Resolves credentials once, then hands off to the transport-specific view."""
     has_bearer = request.META.get("HTTP_AUTHORIZATION", "").startswith("Bearer ")
     identify_mcp_client(request)
@@ -35,9 +34,6 @@ def mcp_endpoint(request):
         return build_unauthorized_response(request, error_code=error_code)
 
     logger.info("MCP authenticated: method=%s", request.method)
-
-    if request.method == "GET":
-        return sse_open(request, credentials, token_expires_at)
 
     if request.method == "POST":
         return http_mcp(request, credentials, token_expires_at)

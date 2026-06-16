@@ -26,7 +26,7 @@ from .session_store import (
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "2024-11-05"
+PROTOCOL_VERSION = "2025-03-26"
 
 # ── Input schema validation ───────────────────────────────────────────────────
 
