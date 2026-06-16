@@ -10,9 +10,9 @@ from django.db import migrations, models
 
 
 def _clear_credentials(apps, schema_editor):
-    OAuth_Pkce_Code = apps.get_model("auth_app", "OAuth_Pkce_Code")
+    OAuthCode = apps.get_model("auth_app", "OAuthCode")
     OAuthToken = apps.get_model("auth_app", "OAuthToken")
-    OAuth_Pkce_Code.objects.all().delete()
+    OAuthCode.objects.all().delete()
     OAuthToken.objects.all().delete()
 
 
@@ -25,7 +25,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunPython(_clear_credentials, migrations.RunPython.noop),
         migrations.AlterField(
-            model_name="OAuth_Pkce_Code",
+            model_name="oauthcode",
             name="credentials",
             field=models.JSONField(),
         ),

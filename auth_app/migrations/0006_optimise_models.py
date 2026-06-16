@@ -5,7 +5,7 @@ Optimise OAuthClient:
   - Add db_index to client_id (was unique but no explicit index)
 
 Add OAuthToken.created_at for audit trail.
-Add OAuth_Pkce_Code.client_id db_index for faster exchange lookups.
+Add OAuthCode.client_id db_index for faster exchange lookups.
 """
 from django.db import migrations, models
 
@@ -37,9 +37,9 @@ class Migration(migrations.Migration):
             name="created_at",
             field=models.DateTimeField(auto_now_add=True, null=True),
         ),
-        # OAuth_Pkce_Code: add db_index on client_id for faster exchange lookups
+        # OAuthCode: add db_index on client_id for faster exchange lookups
         migrations.AlterField(
-            model_name="OAuth_Pkce_Code",
+            model_name="oauthcode",
             name="client_id",
             field=models.CharField(max_length=64, db_index=True),
         ),

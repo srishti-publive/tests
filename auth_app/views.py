@@ -21,7 +21,7 @@ import requests
 from mcp_app.nr_utils import add_attrs, notice_err, record_metric, set_txn_name
 from mcp_app.protocol.auth import build_unauthorized_response, resolve_credentials
 
-from .models import OAuthClient, OAuth_Pkce_Code, OAuthToken
+from .models import OAuthClient, OAuthCode, OAuthToken
 from .services import (
     check_origin,
     check_session_ttl,
@@ -269,7 +269,7 @@ def oauth_authorize(request: HttpRequest) -> HttpResponse:
             return render(request, "authorize.html", ctx)
 
         code: str = secrets.token_urlsafe(32)
-        OAuth_Pkce_Code.objects.create(
+        OAuthCode.objects.create(
             code=code,
             client_id=client_id,
             redirect_uri=redirect_uri,
@@ -379,8 +379,8 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         code_verifier: str = data.get("code_verifier", "")
 
         try:
-            auth_code = OAuth_Pkce_Code.objects.get(code=code)
-        except OAuth_Pkce_Code.DoesNotExist:
+            auth_code = OAuthCode.objects.get(code=code)
+        except OAuthCode.DoesNotExist:
             add_attrs([("auth.result", "failure"), ("auth.failure_reason", "missing_params")])
             record_metric("Custom/Auth/auth_failure_count", 1)
             logger.warning("OAuth token: unknown code client=%s", data.get("client_id"))

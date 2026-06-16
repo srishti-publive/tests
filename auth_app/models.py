@@ -18,7 +18,7 @@ class OAuthClient(models.Model):
         verbose_name_plural = "OAuth Clients"
 
 
-class OAuth_Pkce_Code(models.Model):
+class OAuthCode(models.Model):
     """Single-use PKCE authorization code. Valid for 10 minutes, deleted on exchange."""
 
     code           = models.CharField(max_length=128, unique=True)

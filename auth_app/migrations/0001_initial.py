@@ -31,7 +31,7 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
-            name="OAuth_Pkce_Code",
+            name="OAuthCode",
             fields=[
                 (
                     "id",
