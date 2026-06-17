@@ -415,7 +415,7 @@ def oauth_token(request: HttpRequest) -> JsonResponse:
         credentials: dict    = auth_code.credentials
         oauth_client_id: str = data.get("client_id") or auth_code.client_id
         publisher_id         = credentials.get("publisherId", "")
-        # auth_code.delete()
+        auth_code.delete()
 
         # Upsert: return the existing valid token for this client+publisher so
         # the AI client keeps the same stable token identity across re-authorisations.

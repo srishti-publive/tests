@@ -1,5 +1,6 @@
-# Responsibility: Shared settings for all environments. 
-# Never import this directly use settings.local or settings.prod which extend this file.
+# Responsibility: Project settings. Local vs production behaviour is selected at
+# runtime from the environment (RAILWAY_ENVIRONMENT / DJANGO_ENV).
+# DJANGO_SETTINGS_MODULE=publive_mcp.settings resolves here.
 
 import os
 from pathlib import Path
@@ -9,7 +10,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ── Environment selection ───────────────────────────────────────────────────────
+_env = os.environ.get("RAILWAY_ENVIRONMENT", os.environ.get("DJANGO_ENV", "")).lower()
+IS_PRODUCTION = _env in ("production", "prod")
 
 # ── Security ──────────────────────────────────────────────────────────────────
 
@@ -17,6 +22,8 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
 ALLOWED_HOSTS = ["*"]
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 
+DEBUG = not IS_PRODUCTION
+SESSION_COOKIE_SECURE = IS_PRODUCTION
 
 CDS_BASE_URL = os.environ.get(
     "CDS_BASE_URL", "https://cds-beta.thepublive.com/publisher/{publisher_id}"
@@ -25,8 +32,8 @@ CMS_BASE_URL = os.environ.get(
     "CMS_BASE_URL", "https://cms-beta.thepublive.com/publisher/{publisher_id}"
 )
 
-# /*  
-#     Apps - self-contained module that implements a specific feature 
+# /*
+#     Apps - self-contained module that implements a specific feature
 #     Middleware - runs for every request and response, checkpoints before and after your views.
 # */
 
@@ -48,10 +55,13 @@ MIDDLEWARE = [
     "mcp_app.middleware.RateLimitMiddleware",
 ]
 
+# Rate limiting disabled in local dev.
+RATE_LIMIT_ENABLED = IS_PRODUCTION
+
 ROOT_URLCONF = "publive_mcp.urls"
 
 
-# ### # 
+# ### #
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -66,7 +76,6 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "publive_mcp.wsgi.application"
-
 
 
 DATABASES = {
@@ -93,7 +102,6 @@ SESSION_COOKIE_AGE = 10 * 356 * 24 * 3600
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_SAVE_EVERY_REQUEST = True
-
 
 
 # ── OAuth security ────────────────────────────────────────────────────────────
@@ -156,7 +164,8 @@ LOGGING = {
         },
         "mcp_app": {
             "handlers": ["console"],
-            "level": "INFO",
+            # DEBUG-level for application code in local dev, INFO in production.
+            "level": "INFO" if IS_PRODUCTION else "DEBUG",
             "propagate": False,
         },
         "auth_app": {

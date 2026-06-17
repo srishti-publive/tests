@@ -20,7 +20,8 @@ COPY . .
 
 ARG DJANGO_SECRET_KEY=build-time-placeholder-not-used-at-runtime
 ENV DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-ENV DJANGO_SETTINGS_MODULE=publive_mcp.settings.prod
+ENV DJANGO_SETTINGS_MODULE=publive_mcp.settings
+ENV DJANGO_ENV=production
 
 # Collect static files at build time 
 RUN python manage.py collectstatic --noinput
